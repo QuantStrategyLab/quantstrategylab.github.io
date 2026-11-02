@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QuantStrategyLab</title>
+<meta name="description" content="QuantStrategyLab is an independent research group building and testing systematic investment strategies under explicit risk controls. Research only; not investment advice.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/styles.css">
+<script>
+  (function () {
+    "use strict";
+    function read(key) {
+      try { return localStorage.getItem(key); } catch (error) { return null; }
+    }
+    var query = null;
+    try { query = new URLSearchParams(window.location.search); } catch (error) { /* ignore */ }
+    var queryLang = query ? query.get("lang") : null;
+    var storedLang = read("qsl-lang");
+    var browserLang = String(navigator.language || "en").toLowerCase().indexOf("zh") === 0 ? "zh-CN" : "en";
+    var lang = (queryLang === "en" || queryLang === "zh-CN") ? queryLang
+      : ((storedLang === "en" || storedLang === "zh-CN") ? storedLang : browserLang);
+    var queryTheme = query ? query.get("theme") : null;
+    var storedTheme = read("qsl-theme");
+    var theme = (queryTheme === "dark" || queryTheme === "light") ? queryTheme
+      : ((storedTheme === "dark" || storedTheme === "light") ? storedTheme
+        : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+    document.documentElement.lang = lang;
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+</head>
+<body id="top">
+
+<header>
+  <div class="w">
+    <a class="mark" href="#top">
+      <svg viewBox="0 0 26 26" aria-hidden="true" focusable="false"><rect x=".75" y=".75" width="24.5" height="24.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 19h14M6 15h9M6 11h12M6 7h6" stroke="currentColor" stroke-width="1.5"/><rect x="17" y="5" width="3" height="3" fill="var(--acc)"/></svg>
+      <span>QuantStrategyLab</span>
+    </a>
+    <nav class="links" id="primary-nav" aria-label="Primary" data-i18n-aria="nav_label">
+      <a href="#systems" data-i18n="n1"></a>
+      <a href="#principles" data-i18n="n2"></a>
+      <a href="#index" data-i18n="n3"></a>
+      <a href="https://github.com/QuantStrategyLab" data-i18n="n4"></a>
+    </nav>
+    <div class="tools">
+      <button type="button" class="tg js-lang" aria-label="Switch language">中文</button>
+      <button type="button" class="tg js-theme" aria-label="Switch colour theme" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6"/><path d="M8 2a6 6 0 0 0 0 12z" fill="currentColor"/></svg></button>
+      <button type="button" class="tg menu js-menu" aria-label="Menu" aria-controls="primary-nav" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2 4h12M2 8h12M2 12h12"/></svg></button>
+    </div>
+  </div>
+</header>
+
+<main class="w">
+  <section class="hero" aria-labelledby="hero-title">
+    <div>
+      <div class="eyebrow" data-i18n="h_eye"></div>
+      <h1 id="hero-title" data-i18n-html="h_title"></h1>
+      <p class="lede" data-i18n="h_lede"></p>
+      <div class="cta">
+        <a class="btn" href="#index"><span data-i18n="h_cta1"></span><span aria-hidden="true">→</span></a>
+        <a class="lnk" href="#principles" data-i18n="h_cta2"></a>
+      </div>
+    </div>
+    <aside class="cycle" aria-labelledby="cyc">
+      <div class="cycle-h"><h2 id="cyc" data-i18n="c_title"></h2><span class="eyebrow" data-i18n="c_tag"></span></div>
+      <ol>
+        <li><span class="n">01</span><h3 data-i18n="c1"></h3><p data-i18n="c1p"></p><span class="g" data-i18n="c1g"></span></li>
+        <li><span class="n">02</span><h3 data-i18n="c2"></h3><p data-i18n="c2p"></p><span class="g" data-i18n="c2g"></span></li>
+        <li><span class="n">03</span><h3 data-i18n="c3"></h3><p data-i18n="c3p"></p><span class="g" data-i18n="c3g"></span></li>
+        <li class="own"><span class="n">04</span><h3 data-i18n="c4"></h3><p data-i18n="c4p"></p><span class="g" data-i18n="c4g"></span></li>
+      </ol>
+      <div class="cycle-f" data-i18n="c_foot"></div>
+    </aside>
+  </section>
+
+  <section class="s" id="systems" aria-labelledby="systems-title">
+    <div class="s-h">
+      <div><div class="eyebrow" data-i18n="s_eye"></div><h2 id="systems-title" data-i18n="s_title"></h2></div>
+      <p data-i18n="s_lede"></p>
+    </div>
+    <div class="sys">
+      <article><div class="k"><span>01</span><span data-i18n="a1k"></span></div><h3 data-i18n="a1"></h3><p data-i18n="a1p"></p>
+        <dl><dt data-i18n="out"></dt><dd data-i18n="a1o"></dd></dl></article>
+      <article><div class="k"><span>02</span><span data-i18n="a2k"></span></div><h3 data-i18n="a2"></h3><p data-i18n="a2p"></p>
+        <dl><dt data-i18n="out"></dt><dd data-i18n="a2o"></dd></dl></article>
+      <article><div class="k"><span>03</span><span data-i18n="a3k"></span></div><h3 data-i18n="a3"></h3><p data-i18n="a3p"></p>
+        <dl><dt data-i18n="out"></dt><dd data-i18n="a3o"></dd></dl></article>
+      <article><div class="k"><span>04</span><span data-i18n="a4k"></span></div><h3 data-i18n="a4"></h3><p data-i18n="a4p"></p>
+        <dl><dt data-i18n="out"></dt><dd data-i18n="a4o"></dd></dl></article>
+      <article><div class="k"><span>05</span><span data-i18n="a5k"></span></div><h3 data-i18n="a5"></h3><p data-i18n="a5p"></p>
+        <dl><dt data-i18n="out"></dt><dd data-i18n="a5o"></dd></dl></article>
+      <article><div class="k"><span>06</span><span data-i18n="a6k"></span></div><h3 data-i18n="a6"></h3><p data-i18n="a6p"></p>
+        <dl><dt data-i18n="out"></dt><dd data-i18n="a6o"></dd></dl></article>
+    </div>
+  </section>
+
+  <section class="s" id="principles" aria-labelledby="principles-title">
+    <div class="s-h">
+      <div><div class="eyebrow" data-i18n="p_eye"></div><h2 id="principles-title" data-i18n="p_title"></h2></div>
+      <p data-i18n="p_lede"></p>
+    </div>
+    <ol class="prin">
+      <li><div><h3 data-i18n="p1"></h3><p data-i18n="p1p"></p></div></li>
+      <li><div><h3 data-i18n="p2"></h3><p data-i18n="p2p"></p></div></li>
+      <li><div><h3 data-i18n="p3"></h3><p data-i18n="p3p"></p></div></li>
+      <li><div><h3 data-i18n="p4"></h3><p data-i18n="p4p"></p></div></li>
+      <li><div><h3 data-i18n="p5"></h3><p data-i18n="p5p"></p></div></li>
+      <li><div><h3 data-i18n="p6"></h3><p data-i18n="p6p"></p></div></li>
+    </ol>
+  </section>
+
+  <section class="s" id="index" aria-labelledby="index-title" style="border-bottom:0">
+    <div class="s-h">
+      <div><div class="eyebrow" data-i18n="i_eye"></div><h2 id="index-title" data-i18n="i_title"></h2></div>
+      <p data-i18n="i_lede"></p>
+    </div>
+    <div class="idx">
+      <a class="row" href="https://github.com/QuantStrategyLab/QuantAdvisorResearch"><h3 data-i18n="i1"></h3><p data-i18n="i1p"></p><span class="acc" data-i18n="pub"></span><span class="ar" aria-hidden="true">→</span></a>
+      <div class="row"><h3 data-i18n="i2"></h3><p data-i18n="i2p"></p><span class="acc" data-i18n="pub"></span><span class="sr-only" data-i18n="no_public_link"></span></div>
+      <a class="row" href="https://github.com/QuantStrategyLab/QuantPlatformKit"><h3 data-i18n="i3"></h3><p data-i18n="i3p"></p><span class="acc" data-i18n="pub"></span><span class="ar" aria-hidden="true">→</span></a>
+      <div class="row"><h3 data-i18n="i4"></h3><p data-i18n="i4p"></p><span class="acc" data-i18n="restr"></span><span class="sr-only" data-i18n="no_public_link"></span></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="w"><div class="fin">
+    <a class="mark" href="#top"><svg viewBox="0 0 26 26" aria-hidden="true" focusable="false"><rect x=".75" y=".75" width="24.5" height="24.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 19h14M6 15h9M6 11h12M6 7h6" stroke="currentColor" stroke-width="1.5"/><rect x="17" y="5" width="3" height="3" fill="var(--acc)"/></svg><span>QuantStrategyLab</span></a>
+    <div>
+      <p class="disc" data-i18n="f_disc"></p>
+      <div class="meta"><span data-i18n="f_meta"></span><span>© 2026 QuantStrategyLab</span></div>
+    </div>
+  </div></div>
+</footer>
+
+<script src="assets/i18n.js" defer></script>
+<script src="assets/app.js" defer></script>
+</body>
+</html>
