@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="QuantStrategyLab">
+  <style>
+      .plate{fill:#15181D}
+      .glyph{stroke:#E6E4DE}
+      .accent{fill:#8EB8A8}
+      .accent2{stroke:#22483E}
+      .baseline{stroke:#5C7C71}
+      .line{stroke:#E6E4DE}
+      .rim{stroke:#E6E4DE;stroke-opacity:0.55}
+      @media (prefers-color-scheme: dark) {
+      .plate{fill:#15181D}
+      .glyph{stroke:#E6E4DE}
+      .accent{fill:#8EB8A8}
+      .accent2{stroke:#22483E}
+      .baseline{stroke:#5C7C71}
+      .line{stroke:#E6E4DE}
+      .rim{stroke:#E6E4DE;stroke-opacity:0.55}
+      }
+  </style>
+  <rect class="plate" x="0" y="0" width="64" height="64"/>
+  <line class="baseline" x1="17.6" y1="45.6" x2="46.4" y2="45.6" stroke-width="2.4" stroke-linecap="round"/>
+  <path class="glyph" d="M17.6 41.6 L24 41.6 L24 36 L31.2 36 L31.2 29.6 L38.4 29.6 L38.4 23.2 L44.8 23.2" fill="none" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="accent" cx="44.8" cy="23.2" r="3.6"/>
+</svg>

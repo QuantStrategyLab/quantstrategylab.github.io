@@ -1,0 +1,30 @@
+{
+  "name": "QuantStrategyLab Research / 研究",
+  "short_name": "QSL Research",
+  "description": "QuantStrategyLab Research — 量化策略实验室 · 研究. Direction A chart-series icon set.",
+  "lang": "en",
+  "dir": "ltr",
+  "display": "standalone",
+  "background_color": "#F3F4F6",
+  "theme_color": "#1D3F66",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "name": "QuantStrategyLab Gateway / 网关",
+  "short_name": "QSL Gateway",
+  "description": "QuantStrategyLab Gateway — 量化策略实验室 · 网关. Direction A chart-series icon set.",
+  "lang": "en",
+  "dir": "ltr",
+  "display": "standalone",
+  "background_color": "#0E0F10",
+  "theme_color": "#0E0F10",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
