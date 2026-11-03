@@ -138,7 +138,7 @@ test("every site ships all 13 required files with sensible sizes", () => {
   }
   assert.ok(statSync(path.join(PACKAGE, "preview.png")).size < 4 * 1024 * 1024, "preview.png is too large");
   assert.ok(statSync(path.join(PACKAGE, "README.md")).size > 0, "README.md is missing");
-  assert.ok(statSync(path.join(PACKAGE, "INSTALL.md")).size > 0, "INSTALL.md is missing");
+  assert.ok(statSync(path.join(PACKAGE, "install.md")).size > 0, "install.md is missing");
 });
 
 test("raster sets have the required dimensions, alpha and safe-zone bleed", () => {
@@ -365,19 +365,19 @@ test("landing applies the organisation set and keeps a single icon family", () =
 });
 
 test("install guide covers every surface, target and cleanup step", () => {
-  const install = text(PACKAGE, "INSTALL.md");
-  for (const site of SITES) assert.ok(install.includes(site.dir), `INSTALL.md omits ${site.dir}`);
+  const install = text(PACKAGE, "install.md");
+  for (const site of SITES) assert.ok(install.includes(site.dir), `install.md omits ${site.dir}`);
   for (const repo of ["quantstrategylab.github.io", "QuantAdvisorResearch", "QuantAIService"]) {
-    assert.ok(install.includes(repo), `INSTALL.md omits ${repo}`);
+    assert.ok(install.includes(repo), `install.md omits ${repo}`);
   }
   for (const phrase of ["head-snippet.html", "manifest", "Delete", "assets/icons/"]) {
-    assert.ok(install.includes(phrase), `INSTALL.md omits ${phrase}`);
+    assert.ok(install.includes(phrase), `install.md omits ${phrase}`);
   }
   assert.match(install, /owner to confirm/i, "unconfirmed repositories must be labelled");
 });
 
 test("package text carries no identifiers, emails or tokens", () => {
-  const files = [path.join(PACKAGE, "README.md"), path.join(PACKAGE, "INSTALL.md"), path.join(PACKAGE, "contrast.json")];
+  const files = [path.join(PACKAGE, "README.md"), path.join(PACKAGE, "install.md"), path.join(PACKAGE, "contrast.json")];
   for (const site of SITES) {
     for (const name of REQUIRED_SITE_FILES) {
       if (/\.(?:svg|json|html|txt)$/.test(name)) files.push(siteFile(site, name));

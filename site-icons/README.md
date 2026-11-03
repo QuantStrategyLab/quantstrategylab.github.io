@@ -4,7 +4,7 @@ Production icon package for the five QuantStrategyLab surfaces. This folder is
 **not** served by the organisation landing build: the Pages workflow uploads
 `site/` only, so nothing here can leak into the public site by accident.
 
-Owner-approved direction: **A "Chart series"**, 2026-11-03 12:40 SGT.
+The set follows direction A, "Chart series".
 
 ## Shared vocabulary
 
@@ -70,4 +70,4 @@ ICOs are written from those same PNG buffers. The organisation-landing set is
 also copied to `site/assets/` (`favicon.svg` plus `site/assets/icons/`) by the
 builder; that copy is the live landing favicon.
 
-See `INSTALL.md` for per-site integration and cleanup.
+See `install.md` for per-site integration and cleanup.
