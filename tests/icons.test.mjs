@@ -168,6 +168,7 @@ test("raster sets have the required dimensions, alpha and safe-zone bleed", () =
     const plate = hexToRgb(site.palette.light.plate);
     assert.deepEqual(pixelAt(maskable, 0, 0).slice(0, 3), [plate.r, plate.g, plate.b], `${site.key}: maskable corner must be plate colour`);
     const dot = site.normal.dot;
+    if (!dot) continue; // The approved research original has horizontal bars, no endpoint.
     const point = [
       Math.round(((32 + (dot.x - 32) * 0.8) / 64) * 512),
       Math.round(((32 + (dot.y - 32) * 0.8) / 64) * 512)
@@ -223,6 +224,20 @@ test("SVG masters carry light and dark palettes with the chart geometry", () => 
     const small = text(siteFile(site, "icon-16.svg"));
     const maskable = text(siteFile(site, "icon-maskable.svg"));
 
+    if (site.key !== "meridian-console") {
+      // Fixed approved art is shared by light/dark rather than recoloured by media CSS.
+      for (const [label, svg] of [["master", master], ["small", small], ["maskable", maskable]]) {
+        assert.doesNotMatch(svg, /<text\b|@import|https?:\/\/(?!www.w3.org)/i, label);
+        assert.match(svg, /role="img"/);
+        assert.match(svg, /aria-label="[^"]+"/);
+        assert.doesNotMatch(svg, /class="rim"|@media/);
+      }
+      assert.match(master, /viewBox="0 0 64 64"/);
+      assert.match(small, /viewBox="0 0 16 16"/);
+      assert.match(small, /scale\(\.25\)/);
+      assert.match(maskable, /scale\(\.8\)/);
+      continue;
+    }
     assert.match(master, /viewBox="0 0 64 64"/);
     assert.match(master, /<rect class="plate"[^>]*rx="14"/);
     assert.match(master, /stroke-width="5",?/);
@@ -265,13 +280,23 @@ test("head snippets use relative links, one manifest and measured theme colours"
   }
 });
 
-test("measured contrast meets the non-text thresholds in both media modes", () => {
+test("contrast measurements stay current; approved art retains its measured limitations", () => {
   const contrast = JSON.parse(text(PACKAGE, "contrast.json"));
   assert.equal(contrast.direction, "A");
   assert.deepEqual(contrast.thresholds, CONTRAST_THRESHOLDS);
   for (const site of SITES) {
     const measured = contrast.sites[site.key];
     assert.deepEqual(measured, contrastForSite(site), `${site.key}: contrast.json is stale`);
+    // The owner explicitly chose the original art. Do not silently redraw it to
+    // satisfy the former variant's thresholds. Keep reporting all actual ratios.
+    if (site.key !== "meridian-console") {
+      assert.deepEqual(site.palette.light, site.palette.dark);
+      assert.equal(site.palette.staticRimAlpha, site.key === "qrs-reconciliation" ? 1 : 0);
+      for (const mode of ["light", "dark"]) {
+        for (const value of Object.values(measured[mode])) assert.ok(Number.isFinite(value) && value >= 1);
+      }
+      continue;
+    }
     for (const mode of ["light", "dark"]) {
       const values = measured[mode];
       assert.ok(values.glyphOnPlate >= CONTRAST_THRESHOLDS.glyphOnPlate, `${site.key} ${mode}: glyph ${values.glyphOnPlate}`);

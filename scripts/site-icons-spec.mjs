@@ -97,27 +97,27 @@ export const SITES = [
     shortName: "QSL Research",
     assetBase: "assets/icons",
     concept:
-      "The research desk uses the existing three-bar QAR geometry, stroked in teal on Research Desk navy, with a bone end dot on the tallest bar and a muted baseline.",
+      "Approved direction A: two white horizontal research bars, a shorter teal bar, and a pale blue baseline on navy.",
     palette: {
       light: {
         plate: "#1D3F66",
-        glyph: "#4FB3A7",
-        accent: "#E6E4DE",
+        glyph: "#FFFFFF",
+        accent: "#4FB3A7",
         accent2: "#4FB3A7",
-        baseline: "#7FA2B8",
-        line: "#4FB3A7",
-        rim: { color: "#E6E4DE", alpha: 0.45 }
+        baseline: "#9DBBE0",
+        line: "#FFFFFF",
+        rim: { color: "#1D3F66", alpha: 0 }
       },
       dark: {
         plate: "#1D3F66",
-        glyph: "#4FB3A7",
-        accent: "#E6E4DE",
+        glyph: "#FFFFFF",
+        accent: "#4FB3A7",
         accent2: "#4FB3A7",
-        baseline: "#7FA2B8",
-        line: "#4FB3A7",
-        rim: { color: "#E6E4DE", alpha: 0.45 }
+        baseline: "#9DBBE0",
+        line: "#FFFFFF",
+        rim: { color: "#1D3F66", alpha: 0 }
       },
-      staticRimAlpha: 0.45,
+      staticRimAlpha: 0,
       tabLight: "#F3F4F6",
       tabDark: "#16181D",
       themeLight: "#F3F4F6",
@@ -125,25 +125,27 @@ export const SITES = [
       themeColor: "#1D3F66",
       backgroundColor: "#F3F4F6"
     },
+    plate: { x: 0, y: 0, w: 64, h: 64, rx: 14 },
+    borderWidth: 0,
     normal: {
-      baseline: { points: [[14, 49], [50, 49]], width: 3, role: "baseline" },
+      baseline: { points: [[15, 52], [49, 52]], width: 3, role: "baseline" },
       strokes: [
-        { points: [[19, 36], [19, 48]], width: 5, role: "glyph" },
-        { points: [[31, 27], [31, 48]], width: 5, role: "glyph" },
-        { points: [[43, 18], [43, 48]], width: 5, role: "glyph" }
+        { points: [[15, 20], [49, 20]], width: 5, role: "glyph" },
+        { points: [[15, 32], [40, 32]], width: 5, role: "glyph" },
+        { points: [[15, 44], [28, 44]], width: 5, role: "accent2" }
       ],
-      dot: { x: 43, y: 18, r: 4.5, role: "accent" }
+      dot: null
     },
     small: {
-      baseline: { points: [[3, 13], [13, 13]], width: 1, role: "baseline" },
+      baseline: { points: [[3.75, 13], [12.25, 13]], width: 0.75, role: "baseline" },
       strokes: [
-        { points: [[4.5, 9.5], [4.5, 12.5]], width: 1.6, role: "glyph" },
-        { points: [[8, 7.5], [8, 12.5]], width: 1.6, role: "glyph" },
-        { points: [[11.5, 5], [11.5, 12.5]], width: 1.6, role: "glyph" }
+        { points: [[3.75, 5], [12.25, 5]], width: 1.25, role: "glyph" },
+        { points: [[3.75, 8], [10, 8]], width: 1.25, role: "glyph" },
+        { points: [[3.75, 11], [7, 11]], width: 1.25, role: "accent2" }
       ],
-      dot: { x: 11.5, y: 5, r: 1.4, role: "accent" }
+      dot: null
     },
-    caveats: "Three bars remain separable at 16 px because the simplified glyph uses two gaps and a 1.6 px stroke. The static PNG carries a bone rim so the navy plate separates from a dark tab strip."
+    caveats: "The approved original is fixed in both colour schemes. Contrast measurements are reported without adding unapproved rims."
   },
   {
     key: "qas-gateway",
@@ -156,27 +158,27 @@ export const SITES = [
     shortName: "QSL Gateway",
     assetBase: "assets/icons",
     concept:
-      "The AI gateway is a signal-orange gate on near-black: two rounded gate posts, a bone request line passing through them, an orange end dot, and a dark amber baseline.",
+      "Approved direction A: an orange plate, near-black gate posts and request line, and a light-orange baseline.",
     palette: {
       light: {
-        plate: "#0E0F10",
-        glyph: "#FF7A1A",
-        accent: "#FF7A1A",
-        accent2: "#FFB27A",
-        baseline: "#B25A12",
-        line: "#E6E4DE",
-        rim: { color: "#E6E4DE", alpha: 0.55 }
+        plate: "#FF7A1A",
+        glyph: "#0E0F10",
+        accent: "#0E0F10",
+        accent2: "#211E19",
+        baseline: "#FFD2AE",
+        line: "#0E0F10",
+        rim: { color: "#FF7A1A", alpha: 0 }
       },
       dark: {
-        plate: "#0E0F10",
-        glyph: "#FF7A1A",
-        accent: "#FF7A1A",
-        accent2: "#FFB27A",
-        baseline: "#B25A12",
-        line: "#E6E4DE",
-        rim: { color: "#E6E4DE", alpha: 0.55 }
+        plate: "#FF7A1A",
+        glyph: "#0E0F10",
+        accent: "#0E0F10",
+        accent2: "#211E19",
+        baseline: "#FFD2AE",
+        line: "#0E0F10",
+        rim: { color: "#FF7A1A", alpha: 0 }
       },
-      staticRimAlpha: 0.55,
+      staticRimAlpha: 0,
       tabLight: "#F3F4F6",
       tabDark: "#16181D",
       themeLight: "#F3F4F6",
@@ -184,25 +186,27 @@ export const SITES = [
       themeColor: "#0E0F10",
       backgroundColor: "#0E0F10"
     },
+    plate: { x: 0, y: 0, w: 64, h: 64, rx: 14 },
+    borderWidth: 0,
     normal: {
-      baseline: { points: [[14, 49], [50, 49]], width: 3, role: "baseline" },
+      baseline: { points: [[14, 50], [50, 50]], width: 4, role: "baseline" },
       strokes: [
-        { points: [[24, 18], [24, 46]], width: 5, role: "glyph" },
-        { points: [[42, 18], [42, 46]], width: 5, role: "glyph" },
-        { points: [[14, 32], [50, 32]], width: 5, role: "line" }
+        { points: [[22, 14], [22, 40]], width: 4, role: "glyph" },
+        { points: [[42, 14], [42, 40]], width: 4, role: "glyph" },
+        { points: [[12, 27], [48, 27]], width: 5, role: "glyph" }
       ],
-      dot: { x: 50, y: 32, r: 4.5, role: "accent" }
+      dot: { x: 51, y: 27, r: 4.5, role: "accent" }
     },
     small: {
-      baseline: { points: [[3, 13], [13, 13]], width: 1, role: "baseline" },
+      baseline: { points: [[3.5, 12.5], [12.5, 12.5]], width: 1, role: "baseline" },
       strokes: [
-        { points: [[6, 4.5], [6, 12.5]], width: 1.6, role: "glyph" },
-        { points: [[11, 4.5], [11, 12.5]], width: 1.6, role: "glyph" },
-        { points: [[3, 8], [13, 8]], width: 1.5, role: "line" }
+        { points: [[5.5, 3.5], [5.5, 10]], width: 1, role: "glyph" },
+        { points: [[10.5, 3.5], [10.5, 10]], width: 1, role: "glyph" },
+        { points: [[3, 6.75], [12, 6.75]], width: 1.25, role: "glyph" }
       ],
-      dot: { x: 13, y: 8, r: 1.4, role: "accent" }
+      dot: { x: 12.75, y: 6.75, r: 1.125, role: "accent" }
     },
-    caveats: "The bone request line separates from the orange posts at 16 px; the static PNG carries a bone rim for dark tab strips."
+    caveats: "The approved original is fixed in both colour schemes. Contrast measurements are reported without adding unapproved rims."
   },
   {
     key: "qrs-reconciliation",
@@ -215,27 +219,27 @@ export const SITES = [
     shortName: "QSL Recon",
     assetBase: "assets/icons",
     concept:
-      "Reconciliation reads as a paper ledger: two entries in ink and amber converge on one matched green point, with a muted baseline. The dark-media branch flips to an ink plate with paper strokes.",
+      "Approved direction A: a paper plate with its original ink border, symmetric ink chevron, green endpoint, and amber baseline.",
     palette: {
       light: {
-        plate: "#F4EEE1",
+        plate: "#EDE5D3",
         glyph: "#211E19",
         accent: "#2C5A39",
-        accent2: "#9A6410",
-        baseline: "#8A8378",
+        accent2: "#211E19",
+        baseline: "#9A6410",
         line: "#211E19",
-        rim: { color: "#211E19", alpha: 0.55 }
+        rim: { color: "#211E19", alpha: 1 }
       },
       dark: {
-        plate: "#211E19",
-        glyph: "#F4EEE1",
-        accent: "#6FAE7C",
-        accent2: "#C98A2E",
-        baseline: "#8A8378",
-        line: "#F4EEE1",
-        rim: { color: "#F4EEE1", alpha: 0.5 }
+        plate: "#EDE5D3",
+        glyph: "#211E19",
+        accent: "#2C5A39",
+        accent2: "#211E19",
+        baseline: "#9A6410",
+        line: "#211E19",
+        rim: { color: "#211E19", alpha: 1 }
       },
-      staticRimAlpha: 0.55,
+      staticRimAlpha: 1,
       tabLight: "#F3F4F6",
       tabDark: "#16181D",
       themeLight: "#F4EEE1",
@@ -243,23 +247,25 @@ export const SITES = [
       themeColor: "#211E19",
       backgroundColor: "#F4EEE1"
     },
+    plate: { x: 1.5, y: 1.5, w: 61, h: 61, rx: 13 },
+    borderWidth: 3,
     normal: {
-      baseline: { points: [[14, 49], [50, 49]], width: 3, role: "baseline" },
+      baseline: { points: [[14, 52], [50, 52]], width: 3, role: "baseline" },
       strokes: [
-        { points: [[14, 23], [29, 23], [42, 28]], width: 5, role: "glyph" },
-        { points: [[14, 42], [29, 42], [42, 28]], width: 5, role: "accent2" }
+        { points: [[14, 20], [32, 32], [48, 32]], width: 5, role: "glyph" },
+        { points: [[14, 44], [32, 32]], width: 5, role: "glyph" }
       ],
-      dot: { x: 42, y: 28, r: 4.5, role: "accent" }
+      dot: { x: 50, y: 32, r: 5, role: "accent" }
     },
     small: {
-      baseline: { points: [[3, 13], [13, 13]], width: 1, role: "baseline" },
+      baseline: { points: [[3.5, 13], [12.5, 13]], width: 0.75, role: "baseline" },
       strokes: [
-        { points: [[3.5, 5.5], [7, 5.5], [11.5, 7.5]], width: 1.5, role: "glyph" },
-        { points: [[3.5, 10.5], [7, 10.5], [11.5, 7.5]], width: 1.5, role: "accent2" }
+        { points: [[3.5, 5], [8, 8], [12, 8]], width: 1.25, role: "glyph" },
+        { points: [[3.5, 11], [8, 8]], width: 1.25, role: "glyph" }
       ],
-      dot: { x: 11.5, y: 7.5, r: 1.4, role: "accent" }
+      dot: { x: 12.5, y: 8, r: 1.25, role: "accent" }
     },
-    caveats: "The paper plate carries an ink rim on light chrome; the dark-media branch replaces it with ink and a paper rim so the plate never disappears."
+    caveats: "The approved original is fixed in both colour schemes. Contrast measurements are reported without adding unapproved rims."
   },
   {
     key: "organisation-landing",
@@ -272,27 +278,27 @@ export const SITES = [
     shortName: "QSL",
     assetBase: "assets/icons",
     concept:
-      "The organisation landing icon is a stepped equity line in bone on ink, with a mint end dot and a deep green baseline. It is the most restrained set in the family.",
+      "Approved direction A: a green plate, bone stepped line and endpoint, and mint baseline.",
     palette: {
       light: {
-        plate: "#15181D",
-        glyph: "#E6E4DE",
-        accent: "#8EB8A8",
-        accent2: "#22483E",
-        baseline: "#5C7C71",
-        line: "#E6E4DE",
-        rim: { color: "#E6E4DE", alpha: 0.55 }
+        plate: "#22483E",
+        glyph: "#F5F4EF",
+        accent: "#F5F4EF",
+        accent2: "#211E19",
+        baseline: "#8EB8A8",
+        line: "#F5F4EF",
+        rim: { color: "#22483E", alpha: 0 }
       },
       dark: {
-        plate: "#15181D",
-        glyph: "#E6E4DE",
-        accent: "#8EB8A8",
-        accent2: "#22483E",
-        baseline: "#5C7C71",
-        line: "#E6E4DE",
-        rim: { color: "#E6E4DE", alpha: 0.55 }
+        plate: "#22483E",
+        glyph: "#F5F4EF",
+        accent: "#F5F4EF",
+        accent2: "#211E19",
+        baseline: "#8EB8A8",
+        line: "#F5F4EF",
+        rim: { color: "#22483E", alpha: 0 }
       },
-      staticRimAlpha: 0.55,
+      staticRimAlpha: 0,
       tabLight: "#F3F4F6",
       tabDark: "#16181D",
       themeLight: "#E6E4DE",
@@ -300,29 +306,23 @@ export const SITES = [
       themeColor: "#15181D",
       backgroundColor: "#E6E4DE"
     },
+    plate: { x: 0, y: 0, w: 64, h: 64, rx: 14 },
+    borderWidth: 0,
     normal: {
-      baseline: { points: [[14, 49], [50, 49]], width: 3, role: "baseline" },
+      baseline: { points: [[14, 50], [50, 50]], width: 4, role: "baseline" },
       strokes: [
-        {
-          points: [[14, 44], [22, 44], [22, 37], [31, 37], [31, 29], [40, 29], [40, 21], [48, 21]],
-          width: 5,
-          role: "glyph"
-        }
+        { points: [[14, 42], [24, 42], [24, 33], [35, 33], [35, 24], [50, 24]], width: 5, role: "glyph" }
       ],
-      dot: { x: 48, y: 21, r: 4.5, role: "accent" }
+      dot: { x: 50, y: 24, r: 4, role: "accent" }
     },
     small: {
-      baseline: { points: [[3, 13], [13, 13]], width: 1.1, role: "baseline" },
+      baseline: { points: [[3.5, 12.5], [12.5, 12.5]], width: 1, role: "baseline" },
       strokes: [
-        {
-          points: [[3.5, 11], [5.5, 11], [5.5, 9], [8.2, 9], [8.2, 6.8], [10.8, 6.8], [10.8, 4.8], [12.5, 4.8]],
-          width: 1.8,
-          role: "glyph"
-        }
+        { points: [[3.5, 10.5], [6, 10.5], [6, 8.25], [8.75, 8.25], [8.75, 6], [12.5, 6]], width: 1.25, role: "glyph" }
       ],
-      dot: { x: 12.5, y: 4.8, r: 1.5, role: "accent" }
+      dot: { x: 12.5, y: 6, r: 1, role: "accent" }
     },
-    caveats: "The ink plate is given a subtle bone rim in dark chrome and in the static PNGs; the mint dot is the only saturated accent."
+    caveats: "The approved original is fixed in both colour schemes. Contrast measurements are reported without adding unapproved rims."
   }
 ];
 

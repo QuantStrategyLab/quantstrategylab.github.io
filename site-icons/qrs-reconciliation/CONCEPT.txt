@@ -3,14 +3,14 @@ Site: Reconciliation ledger
 English name: QuantStrategyLab Reconciliation
 Chinese name: 量化策略实验室 · 对账
 
-Palette (light media): plate #F4EEE1; glyph #211E19; accent #2C5A39; secondary #9A6410; baseline #8A8378; rim #211E19 @ 0.55
-Palette (dark media):  plate #211E19; glyph #F4EEE1; accent #6FAE7C; secondary #C98A2E; baseline #8A8378; rim #F4EEE1 @ 0.5
+Palette (light media): plate #EDE5D3; glyph #211E19; accent #2C5A39; secondary #211E19; baseline #9A6410; rim #211E19 @ 1
+Palette (dark media):  plate #EDE5D3; glyph #211E19; accent #2C5A39; secondary #211E19; baseline #9A6410; rim #211E19 @ 1
 
 Geometry: rx14 plate in a 64-unit box, 5 px round strokes, one end dot, one baseline. The 16 px file uses a simplified rx3.5 plate and a 1.4–1.8 px stroke.
 
 Contrast (WCAG 2.1, measured by scripts/build-site-icons.mjs):
-  light: glyph/plate 14.37:1; dot/plate 6.91:1; baseline/plate 3.24:1; plate vs light tab 1.05:1; rim vs light tab 3.67:1
-  dark:  glyph/plate 14.37:1; dot/plate 6.34:1; baseline/plate 4.43:1; plate vs dark tab 1.07:1; rim vs dark tab 4.69:1
-  static PNG: plate vs light tab 1.05:1; plate vs dark tab 15.36:1; rim alpha 0.55; rim vs light tab 3.67:1; rim vs dark tab 1.03:1
+  light: glyph/plate 13.25:1; dot/plate 6.37:1; baseline/plate 3.98:1; plate vs light tab 1.14:1; rim vs light tab 15.09:1
+  dark:  glyph/plate 13.25:1; dot/plate 6.37:1; baseline/plate 3.98:1; plate vs dark tab 14.16:1; rim vs dark tab 1.07:1
+  static PNG: plate vs light tab 1.14:1; plate vs dark tab 14.16:1; rim alpha 1; rim vs light tab 15.09:1; rim vs dark tab 1.07:1
 
-Caveat: The paper plate carries an ink rim on light chrome; the dark-media branch replaces it with ink and a paper rim so the plate never disappears.
+Caveat: The approved original is fixed in both colour schemes. Contrast measurements are reported without adding unapproved rims.

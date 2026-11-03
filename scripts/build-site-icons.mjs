@@ -15,6 +15,12 @@ import {
 } from "./site-icons-spec.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const APPROVED_ART = JSON.parse(readFileSync(new URL("./approved-direction-a.json", import.meta.url), "utf8"));
+for (const site of SITES.filter((site) => site.key !== "meridian-console")) {
+  if (typeof APPROVED_ART[site.key] !== "string" || !APPROVED_ART[site.key].startsWith('<svg ') || !APPROVED_ART[site.key].endsWith('</svg>')) {
+    throw new Error(`Missing approved Direction A original: ${site.key}`);
+  }
+}
 const PACKAGE_ROOT = path.join(ROOT, "site-icons");
 const LANDING_ICON_DIR = path.join(ROOT, "site", "assets", "icons");
 const LANDING_SVG = path.join(ROOT, "site", "assets", "favicon.svg");
@@ -299,7 +305,9 @@ function renderRgba(site, size, options = {}) {
   if (maskable) {
     raster.fillRect(0, 0, hi, hi, palette.plate);
   } else {
-    const plate = small ? SMALL_PLATE : NORMAL_PLATE;
+    const plate = site.plate
+      ? Object.fromEntries(Object.entries(site.plate).map(([key, value]) => [key, small ? value / 4 : value]))
+      : small ? SMALL_PLATE : NORMAL_PLATE;
     raster.fillRoundedRect(
       scaleCoordinate(plate.x),
       scaleCoordinate(plate.y),
@@ -312,9 +320,11 @@ function renderRgba(site, size, options = {}) {
 
   const rim = palette.rim;
   if (!maskable && rim.alpha > 0) {
-    const plate = small ? SMALL_PLATE : NORMAL_PLATE;
-    const rimWidth = 1.5;
-    const inset = rimWidth / 2;
+    const plate = site.plate
+      ? Object.fromEntries(Object.entries(site.plate).map(([key, value]) => [key, small ? value / 4 : value]))
+      : small ? SMALL_PLATE : NORMAL_PLATE;
+    const rimWidth = site.borderWidth ? site.borderWidth / (small ? 4 : 1) : 1.5;
+    const inset = site.borderWidth ? -rimWidth / 2 : rimWidth / 2;
     raster.fillRoundedRing(
       scaleCoordinate(plate.x + inset),
       scaleCoordinate(plate.y + inset),
@@ -374,6 +384,17 @@ function styleRule(role, palette) {
 }
 
 function svgFor(site, variant) {
+  const approved = APPROVED_ART[site.key];
+  if (approved) {
+    const accessible = approved.replace('<svg ', `<svg role="img" aria-label="${site.englishName}" `);
+    if (variant === "normal") return `${accessible}\n`;
+    const body = approved.slice(approved.indexOf(">") + 1, -6);
+    if (variant === "small") {
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" role="img" aria-label="${site.englishName}"><g transform="scale(.25)">${body}</g></svg>\n`;
+    }
+    const glyph = body.replace(/^<rect[^>]+\/>/, "");
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="${site.englishName}"><rect class="plate" x="0" y="0" width="64" height="64" fill="${site.palette.light.plate}"/><g transform="translate(6.4 6.4) scale(.8)">${glyph}</g></svg>\n`;
+  }
   const small = variant === "small";
   const maskable = variant === "maskable";
   const unit = small ? 16 : 64;
@@ -711,7 +732,7 @@ function makePreview() {
     });
   }
 
-  sheet.text("STATIC PNG SETS USE THE LIGHT PALETTE WITH A DARK-CHROME RIM WHERE NEEDED.", margin, height - 38, 2, "#6B7280");
+  sheet.text("STATIC PNG SETS PRESERVE THE APPROVED DIRECTION A PALETTES AND BORDERS.", margin, height - 38, 2, "#6B7280");
   return { width, height, rgba: sheet.data };
 }
 

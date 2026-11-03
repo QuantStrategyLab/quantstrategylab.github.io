@@ -37,110 +37,110 @@
     },
     "qar-research": {
       "light": {
-        "glyphOnPlate": 4.26,
-        "dotOnPlate": 8.45,
-        "baselineOnPlate": 3.97,
+        "glyphOnPlate": 10.74,
+        "dotOnPlate": 4.26,
+        "baselineOnPlate": 5.43,
         "plateOnTab": 9.76,
         "plateOnTabLight": 9.76,
         "plateOnTabDark": 1.65,
-        "rimOnTabLight": 1.07,
-        "rimOnTabDark": 3.8
+        "rimOnTabLight": 9.76,
+        "rimOnTabDark": 1.65
       },
       "dark": {
-        "glyphOnPlate": 4.26,
-        "dotOnPlate": 8.45,
-        "baselineOnPlate": 3.97,
+        "glyphOnPlate": 10.74,
+        "dotOnPlate": 4.26,
+        "baselineOnPlate": 5.43,
         "plateOnTab": 9.76,
         "plateOnTabLight": 9.76,
         "plateOnTabDark": 1.65,
-        "rimOnTabLight": 1.07,
-        "rimOnTabDark": 3.8
+        "rimOnTabLight": 9.76,
+        "rimOnTabDark": 1.65
       },
       "static": {
-        "rimAlpha": 0.45,
-        "rimOnTabLight": 1.07,
-        "rimOnTabDark": 3.8
+        "rimAlpha": 0,
+        "rimOnTabLight": 9.76,
+        "rimOnTabDark": 1.65
       }
     },
     "qas-gateway": {
       "light": {
         "glyphOnPlate": 7.36,
         "dotOnPlate": 7.36,
-        "baselineOnPlate": 3.99,
-        "plateOnTab": 17.43,
-        "plateOnTabLight": 17.43,
-        "plateOnTabDark": 1.08,
-        "rimOnTabLight": 1.08,
-        "rimOnTabDark": 5
+        "baselineOnPlate": 1.87,
+        "plateOnTab": 2.37,
+        "plateOnTabLight": 2.37,
+        "plateOnTabDark": 6.81,
+        "rimOnTabLight": 2.37,
+        "rimOnTabDark": 6.81
       },
       "dark": {
         "glyphOnPlate": 7.36,
         "dotOnPlate": 7.36,
-        "baselineOnPlate": 3.99,
-        "plateOnTab": 17.43,
-        "plateOnTabLight": 17.43,
-        "plateOnTabDark": 1.08,
-        "rimOnTabLight": 1.08,
-        "rimOnTabDark": 5
+        "baselineOnPlate": 1.87,
+        "plateOnTab": 2.37,
+        "plateOnTabLight": 2.37,
+        "plateOnTabDark": 6.81,
+        "rimOnTabLight": 2.37,
+        "rimOnTabDark": 6.81
       },
       "static": {
-        "rimAlpha": 0.55,
-        "rimOnTabLight": 1.08,
-        "rimOnTabDark": 5
+        "rimAlpha": 0,
+        "rimOnTabLight": 2.37,
+        "rimOnTabDark": 6.81
       }
     },
     "qrs-reconciliation": {
       "light": {
-        "glyphOnPlate": 14.37,
-        "dotOnPlate": 6.91,
-        "baselineOnPlate": 3.24,
-        "plateOnTab": 1.05,
-        "plateOnTabLight": 1.05,
-        "plateOnTabDark": 15.36,
-        "rimOnTabLight": 3.67,
-        "rimOnTabDark": 1.03
+        "glyphOnPlate": 13.25,
+        "dotOnPlate": 6.37,
+        "baselineOnPlate": 3.98,
+        "plateOnTab": 1.14,
+        "plateOnTabLight": 1.14,
+        "plateOnTabDark": 14.16,
+        "rimOnTabLight": 15.09,
+        "rimOnTabDark": 1.07
       },
       "dark": {
-        "glyphOnPlate": 14.37,
-        "dotOnPlate": 6.34,
-        "baselineOnPlate": 4.43,
-        "plateOnTab": 15.09,
-        "plateOnTabLight": 15.09,
-        "plateOnTabDark": 1.07,
-        "rimOnTabLight": 1.02,
-        "rimOnTabDark": 4.69
+        "glyphOnPlate": 13.25,
+        "dotOnPlate": 6.37,
+        "baselineOnPlate": 3.98,
+        "plateOnTab": 1.14,
+        "plateOnTabLight": 1.14,
+        "plateOnTabDark": 14.16,
+        "rimOnTabLight": 15.09,
+        "rimOnTabDark": 1.07
       },
       "static": {
-        "rimAlpha": 0.55,
-        "rimOnTabLight": 3.67,
-        "rimOnTabDark": 1.03
+        "rimAlpha": 1,
+        "rimOnTabLight": 15.09,
+        "rimOnTabDark": 1.07
       }
     },
     "organisation-landing": {
       "light": {
-        "glyphOnPlate": 13.99,
-        "dotOnPlate": 8.11,
-        "baselineOnPlate": 3.88,
-        "plateOnTab": 16.17,
-        "plateOnTabLight": 16.17,
-        "plateOnTabDark": 1,
-        "rimOnTabLight": 1.08,
-        "rimOnTabDark": 5
+        "glyphOnPlate": 9.24,
+        "dotOnPlate": 9.24,
+        "baselineOnPlate": 4.64,
+        "plateOnTab": 9.24,
+        "plateOnTabLight": 9.24,
+        "plateOnTabDark": 1.75,
+        "rimOnTabLight": 9.24,
+        "rimOnTabDark": 1.75
       },
       "dark": {
-        "glyphOnPlate": 13.99,
-        "dotOnPlate": 8.11,
-        "baselineOnPlate": 3.88,
-        "plateOnTab": 16.17,
-        "plateOnTabLight": 16.17,
-        "plateOnTabDark": 1,
-        "rimOnTabLight": 1.08,
-        "rimOnTabDark": 5
+        "glyphOnPlate": 9.24,
+        "dotOnPlate": 9.24,
+        "baselineOnPlate": 4.64,
+        "plateOnTab": 9.24,
+        "plateOnTabLight": 9.24,
+        "plateOnTabDark": 1.75,
+        "rimOnTabLight": 9.24,
+        "rimOnTabDark": 1.75
       },
       "static": {
-        "rimAlpha": 0.55,
-        "rimOnTabLight": 1.08,
-        "rimOnTabDark": 5
+        "rimAlpha": 0,
+        "rimOnTabLight": 9.24,
+        "rimOnTabDark": 1.75
       }
     }
   }
