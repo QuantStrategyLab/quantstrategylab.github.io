@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="QuantStrategyLab Gateway">
+  <style>
+      .plate{fill:#0E0F10}
+      .glyph{stroke:#FF7A1A}
+      .accent{fill:#FF7A1A}
+      .accent2{stroke:#FFB27A}
+      .baseline{stroke:#B25A12}
+      .line{stroke:#E6E4DE}
+      .rim{stroke:#E6E4DE;stroke-opacity:0.55}
+      @media (prefers-color-scheme: dark) {
+      .plate{fill:#0E0F10}
+      .glyph{stroke:#FF7A1A}
+      .accent{fill:#FF7A1A}
+      .accent2{stroke:#FFB27A}
+      .baseline{stroke:#B25A12}
+      .line{stroke:#E6E4DE}
+      .rim{stroke:#E6E4DE;stroke-opacity:0.55}
+      }
+  </style>
+  <rect class="plate" x="0" y="0" width="64" height="64"/>
+  <line class="baseline" x1="17.6" y1="45.6" x2="46.4" y2="45.6" stroke-width="2.4" stroke-linecap="round"/>
+  <path class="glyph" d="M25.6 20.8 L25.6 43.2" fill="none" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="glyph" d="M40 20.8 L40 43.2" fill="none" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M17.6 32 L46.4 32" fill="none" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="accent" cx="46.4" cy="32" r="3.6"/>
+</svg>

@@ -1,0 +1,30 @@
+{
+  "name": "QuantStrategyLab Reconciliation / 对账",
+  "short_name": "QSL Recon",
+  "description": "QuantStrategyLab Reconciliation — 量化策略实验室 · 对账. Direction A chart-series icon set.",
+  "lang": "en",
+  "dir": "ltr",
+  "display": "standalone",
+  "background_color": "#F4EEE1",
+  "theme_color": "#211E19",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

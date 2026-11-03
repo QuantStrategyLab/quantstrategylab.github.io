@@ -205,10 +205,26 @@ test("controls expose accessible names and state", () => {
   assert.match(appJs, /menu_close/);
 });
 
-test("favicon is a local blue line-chart SVG", () => {
+test("favicon is the local Direction A stepped equity mark", () => {
   assert.match(favicon, /<svg[^>]*xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
-  assert.match(favicon, /stroke="#2F6FED"/);
-  assert.match(favicon, />QSL<\/text>/);
+  assert.match(favicon, /viewBox="0 0 64 64"/);
+  assert.match(favicon, /prefers-color-scheme: dark/);
+  assert.match(favicon, /#8EB8A8/);
+  assert.match(favicon, /rx="14"/);
+  assert.match(favicon, /stroke-width="5"/);
+  assert.doesNotMatch(favicon, /<text\b/);
+  assert.doesNotMatch(favicon, /#2F6FED|>QSL<\/text>/);
+});
+
+test("landing head links one Direction A icon family and its manifest", () => {
+  assert.equal((html.match(/rel="icon"/g) || []).length, 2, "expected the SVG and ICO icon links");
+  assert.equal((html.match(/rel="manifest"/g) || []).length, 1, "expected exactly one manifest link");
+  assert.match(html, /<link rel="icon" href="assets\/favicon\.svg" type="image\/svg\+xml">/);
+  assert.match(html, /<link rel="icon" href="assets\/icons\/favicon\.ico" sizes="any">/);
+  assert.match(html, /<link rel="apple-touch-icon" href="assets\/icons\/apple-touch-icon\.png">/);
+  assert.match(html, /<link rel="manifest" href="assets\/icons\/manifest\.webmanifest">/);
+  assert.match(html, /<meta name="theme-color" content="#E6E4DE" media="\(prefers-color-scheme: light\)">/);
+  assert.match(html, /<meta name="theme-color" content="#15181D" media="\(prefers-color-scheme: dark\)">/);
 });
 
 test("copy makes no performance, return or guarantee claims", () => {

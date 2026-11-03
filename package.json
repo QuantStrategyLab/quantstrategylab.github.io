@@ -4,6 +4,8 @@
   "private": true,
   "description": "Static organisation landing page for QuantStrategyLab.",
   "scripts": {
+    "build:icons": "node scripts/build-site-icons.mjs",
+    "pretest": "node scripts/build-site-icons.mjs",
     "test": "node --test tests/*.test.mjs"
   }
 }
