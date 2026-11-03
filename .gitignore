@@ -1,0 +1,15 @@
+
+# Working notes are drafts, not documentation. Ignoring them is the only layer
+# that acts before the note is committed — the other two only notice afterwards.
+*[Aa][Uu][Dd][Ii][Tt]*.md
+*[Hh][Aa][Nn][Dd][Oo][Ff][Ff]*.md
+*-[Rr][Ee][Vv][Ii][Ee][Ww]-*.md
+*_[Rr][Ee][Vv][Ii][Ee][Ww]_*.md
+docs/audits/
+docs/plans/
+docs/handoffs/
+docs/superpowers/
+.local/
+ops-notes/
+*.local.md
+*.internal.md
