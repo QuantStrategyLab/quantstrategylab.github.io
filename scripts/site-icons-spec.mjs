@@ -22,7 +22,7 @@ export const REQUIRED_SITE_FILES = [
 
 export const PACKAGE_TEXT_FILES = [
   "README.md",
-  "INSTALL.md",
+  "install.md",
   "contrast.json",
   "preview.png"
 ];
