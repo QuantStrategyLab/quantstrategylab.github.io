@@ -208,7 +208,7 @@ test("controls expose accessible names and state", () => {
 test("favicon is the local Direction A stepped equity mark", () => {
   assert.match(favicon, /<svg[^>]*xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
   assert.match(favicon, /viewBox="0 0 64 64"/);
-  assert.match(favicon, /prefers-color-scheme: dark/);
+  assert.match(favicon, /#22483E/); // Approved fixed green plate in both themes.
   assert.match(favicon, /#8EB8A8/);
   assert.match(favicon, /rx="14"/);
   assert.match(favicon, /stroke-width="5"/);

@@ -87,7 +87,7 @@ No other landing file, copy string or layout was changed.
 
 ### QAR research desk (`QuantAdvisorResearch`)
 
-- Palette: navy `#1D3F66`, teal three-bar geometry `#4FB3A7`, bone end dot.
+- Palette: navy `#1D3F66`, two white horizontal bars, a shorter teal bar `#4FB3A7`, and pale-blue baseline.
 - This replaces any earlier r1 `icon.svg` / `icon-16.svg` /
   `icon-maskable.svg` in the same destination. Delete the old trio so only one
   master remains.
@@ -97,10 +97,8 @@ No other landing file, copy string or layout was changed.
 
 ### AI gateway (`QuantAIService`)
 
-- Palette: near-black `#0E0F10`, signal orange `#FF7A1A`, bone request line
-  passing through two gate posts, amber baseline.
-- The static PNGs carry a bone rim because the near-black plate disappears on a
-  dark tab strip; the SVG also keeps this rim in both media modes for mismatched browser chrome.
+- Palette: signal-orange `#FF7A1A` plate, near-black `#0E0F10` gate posts, request line and endpoint, light-orange baseline.
+- The approved original has no added rim; its palette is fixed in both schemes.
 - **Static-asset route is TBC.** If the gateway service does not serve static
   files, the frontend host (not this PR) must expose `/assets/icons/`. Do not
   add backend handlers, mounts or proxy rules as part of an icon change.
@@ -108,9 +106,8 @@ No other landing file, copy string or layout was changed.
 
 ### Reconciliation ledger
 
-- Palette: paper `#F4EEE1`, ink `#211E19`, matched green `#2C5A39`, amber
-  `#9A6410`. Dark media flips to an ink plate with paper strokes and a paper
-  rim.
+- Palette: paper `#EDE5D3`, ink `#211E19`, matched green `#2C5A39`, amber
+  `#9A6410`. The symmetric chevron and original ink border remain fixed in both schemes.
 - The paper plate is the visible surface on light chrome; the ink rim is what
   keeps it legible where the surface is light. Do not strip the rim from the
   static PNGs.
@@ -143,8 +140,8 @@ npm test
 `tests/icons.test.mjs` fails closed on: missing files, wrong PNG dimensions,
 ICO frames other than 16/32/48, ICO frames that differ from the shipped PNGs,
 malformed or non-bilingual manifests, manifest icons that do not exist, SVG
-text or external references, missing light/dark branches, contrast below the
-non-text thresholds, stale `contrast.json`, a preview that is not 3000 px wide
+text or external references, changed approved masters, incomplete original inventory,
+console contrast below its thresholds, stale `contrast.json`, a preview that is not 3000 px wide
 with both media sections, and a landing copy that differs from the package.
 
 Manual checks after deployment:
