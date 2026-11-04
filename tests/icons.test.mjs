@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
@@ -15,7 +15,7 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE = path.join(ROOT, "site-icons");
-const LANDING = path.join(ROOT, "site", "assets");
+const LANDING = path.join(ROOT, "site");
 const PNG_SIGNATURE = 0x89504e47;
 const HEX = /^#[0-9A-Fa-f]{6}$/;
 
@@ -261,22 +261,37 @@ test("SVG masters carry light and dark palettes with the chart geometry", () => 
   }
 });
 
-test("head snippets use relative links, one manifest and measured theme colours", () => {
+test("head snippets link one manifest, measured theme colours and resolvable paths", () => {
   for (const site of SITES) {
+    const landing = site.key === "organisation-landing";
     const snippet = text(siteFile(site, "head-snippet.html"));
     assert.equal((snippet.match(/<link rel="icon"/g) || []).length, 2, `${site.key}: expected SVG + ICO icon links`);
     assert.equal((snippet.match(/<link rel="manifest"/g) || []).length, 1, `${site.key}: exactly one manifest link`);
-    assert.match(snippet, /<link rel="apple-touch-icon" href="assets\/icons\/apple-touch-icon\.png">/);
+    const appleHref = landing ? "/landing-light-apple-touch-180.png" : "assets/icons/apple-touch-icon.png";
+    assert.match(snippet, new RegExp(`<link rel="apple-touch-icon" href="${appleHref.replace(/[/.]/g, "\\$&")}">`));
     assert.match(snippet, new RegExp(`content="${site.palette.themeLight}" media="\\(prefers-color-scheme: light\\)"`));
     assert.match(snippet, new RegExp(`content="${site.palette.themeDark}" media="\\(prefers-color-scheme: dark\\)"`));
     assert.match(snippet, new RegExp(site.englishName));
     assert.match(snippet, /[\u4e00-\u9fff]/, `${site.key}: snippet needs Chinese copy`);
     for (const match of snippet.matchAll(/href="([^"]+)"/g)) {
       assert.doesNotMatch(match[1], /^(?:https?:)?\/\//, `${site.key}: snippet must not use external links`);
-      assert.doesNotMatch(match[1], /^\//, `${site.key}: snippet must use relative paths`);
+      if (landing) {
+        assert.match(match[1], /^\//, `${site.key}: the root-served landing snippet must be root-relative`);
+      } else {
+        assert.doesNotMatch(match[1], /^\//, `${site.key}: snippet must stay relative for subpath hosts`);
+      }
     }
-    const svgHref = site.key === "organisation-landing" ? "assets/favicon.svg" : "assets/icons/icon.svg";
+    const svgHref = landing ? "/landing-light.svg" : "assets/icons/icon.svg";
     assert.match(snippet, new RegExp(`href="${svgHref.replace(/\./g, "\\.")}"`));
+    if (landing) {
+      // The landing snippet is what site/index.html actually ships, including /favicon.ico.
+      for (const line of snippet.split("\n").filter((value) => value.startsWith("<link"))) {
+        assert.ok(text(ROOT, "site", "index.html").includes(line), `landing head is missing ${line}`);
+      }
+      for (const match of snippet.matchAll(/href="(\/[^"]+)"/g)) {
+        assert.ok(existsSync(path.join(LANDING, match[1].slice(1))), `${match[1]} is not served from the landing root`);
+      }
+    }
   }
 });
 
@@ -335,33 +350,45 @@ test("preview sheet shows both media modes at the required sizes", () => {
   assert.deepEqual(pixelAt(preview, 10, preview.height - 20).slice(0, 3), [0x16, 0x18, 0x1d], "dark section background");
 });
 
-test("landing applies the organisation set and keeps a single icon family", () => {
+test("landing serves the organisation set from its root under usage names", () => {
   const landing = SITES.find((site) => site.key === "organisation-landing");
-  assert.ok(read(LANDING, "favicon.svg").equals(read(siteFile(landing, "icon.svg"))), "landing favicon must be the package master");
-  for (const name of ["favicon.ico", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-maskable-512.png"]) {
-    assert.ok(read(LANDING, "icons", name).equals(read(siteFile(landing, name))), `landing ${name} differs from the package`);
+  const served = {
+    "landing-light.svg": "icon.svg",
+    "favicon.ico": "favicon.ico",
+    "landing-light-apple-touch-180.png": "apple-touch-icon.png",
+    "landing-light-192.png": "icon-192.png",
+    "landing-light-512.png": "icon-512.png",
+    "landing-light-maskable-512.png": "icon-maskable-512.png"
+  };
+  for (const [name, packageName] of Object.entries(served)) {
+    assert.ok(read(LANDING, name).equals(read(siteFile(landing, packageName))), `landing ${name} differs from the package`);
   }
+  const manifest = JSON.parse(text(LANDING, "manifest.webmanifest"));
+  const packaged = JSON.parse(text(siteFile(landing, "manifest.webmanifest.json")));
+  assert.deepEqual({ ...manifest, icons: packaged.icons }, packaged, "landing manifest metadata differs from the package");
   assert.deepEqual(
-    JSON.parse(text(LANDING, "icons", "manifest.webmanifest")),
-    JSON.parse(text(siteFile(landing, "manifest.webmanifest.json"))),
-    "landing manifest differs from the package"
+    manifest.icons.map((icon) => icon.src),
+    ["/landing-light-192.png", "/landing-light-512.png", "/landing-light-maskable-512.png"],
+    "landing manifest must use root-relative usage names"
   );
 
   const html = text(ROOT, "site", "index.html");
-  assert.equal((html.match(/rel="icon"/g) || []).length, 2, "landing must link exactly the SVG and ICO");
+  assert.equal((html.match(/rel="icon"/g) || []).length, 2, "landing must link exactly the ICO and SVG");
   assert.equal((html.match(/rel="manifest"/g) || []).length, 1, "landing must link exactly one manifest");
-  assert.match(html, /<link rel="icon" href="assets\/favicon\.svg" type="image\/svg\+xml">/);
-  assert.match(html, /<link rel="icon" href="assets\/icons\/favicon\.ico" sizes="any">/);
-  assert.match(html, /<link rel="apple-touch-icon" href="assets\/icons\/apple-touch-icon\.png">/);
-  assert.match(html, /<link rel="manifest" href="assets\/icons\/manifest\.webmanifest">/);
+  assert.match(html, /<link rel="icon" href="\/favicon\.ico" sizes="16x16 32x32 48x48">/);
+  assert.match(html, /<link rel="icon" href="\/landing-light\.svg" type="image\/svg\+xml">/);
+  assert.match(html, /<link rel="apple-touch-icon" href="\/landing-light-apple-touch-180\.png">/);
+  assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest">/);
   assert.match(html, /<meta name="theme-color" content="#E6E4DE" media="\(prefers-color-scheme: light\)">/);
   assert.match(html, /<meta name="theme-color" content="#15181D" media="\(prefers-color-scheme: dark\)">/);
   assert.doesNotMatch(html, /#2F6FED|>QSL<\/text>/, "old favicon identity must be gone");
+  assert.doesNotMatch(html, /href="assets\/(favicon|icons)/, "landing must not keep the pre-usage asset layout");
 
-  const assets = readdirSync(LANDING);
-  assert.ok(!assets.includes("favicon.ico"), "legacy favicon.ico must not remain at the assets root");
-  assert.ok(!assets.some((name) => /^icon-\d+\.png$/.test(name)), "landing raster icons belong in assets/icons/");
-  assert.ok(existsSync(path.join(LANDING, "icons", "manifest.webmanifest")));
+  for (const name of Object.keys(served)) {
+    assert.ok(existsSync(path.join(LANDING, name)), `landing root is missing ${name}`);
+  }
+  assert.ok(!existsSync(path.join(LANDING, "assets", "favicon.svg")), "legacy favicon.svg must not remain");
+  assert.ok(!existsSync(path.join(LANDING, "assets", "icons")), "the pre-usage icons folder must be gone");
 });
 
 test("install guide covers every surface, target and cleanup step", () => {
@@ -383,7 +410,7 @@ test("package text carries no identifiers, emails or tokens", () => {
       if (/\.(?:svg|json|html|txt)$/.test(name)) files.push(siteFile(site, name));
     }
   }
-  files.push(path.join(LANDING, "favicon.svg"), path.join(LANDING, "icons", "manifest.webmanifest"));
+  files.push(path.join(LANDING, "landing-light.svg"), path.join(LANDING, "manifest.webmanifest"));
   const all = files.map((file) => readFileSync(file, "utf8")).join("\n");
   assert.doesNotMatch(all, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i, "email address");
   assert.doesNotMatch(all, /\b(?:acct|account)[-_]?\d{3,}\b/i, "account-like identifier");
