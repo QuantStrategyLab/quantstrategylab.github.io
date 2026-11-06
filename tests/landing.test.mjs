@@ -9,7 +9,7 @@ const html = readFileSync(new URL("../site/index.html", import.meta.url), "utf8"
 const css = readFileSync(new URL("../site/assets/styles.css", import.meta.url), "utf8");
 const appJs = readFileSync(new URL("../site/assets/app.js", import.meta.url), "utf8");
 const i18nJs = readFileSync(new URL("../site/assets/i18n.js", import.meta.url), "utf8");
-const favicon = readFileSync(new URL("../site/assets/favicon.svg", import.meta.url), "utf8");
+const favicon = readFileSync(new URL("../site/landing-light.svg", import.meta.url), "utf8");
 
 const LOCALES = ["en", "zh-CN"];
 const THEMES = ["light", "dark"];
@@ -189,7 +189,8 @@ test("page has no third-party requests or runtime network calls", () => {
     assert.ok(!i18nJs.includes(api), `i18n.js must not use ${api}`);
   }
   assert.match(html, /<link rel="stylesheet" href="assets\/styles\.css">/);
-  assert.match(html, /<link rel="icon" href="assets\/favicon\.svg"/);
+  assert.match(html, /<link rel="icon" href="\/favicon\.ico"/);
+  assert.match(html, /<link rel="icon" href="\/landing-light\.svg"/);
   assert.match(html, /<script src="assets\/i18n\.js" defer><\/script>/);
   assert.match(html, /<script src="assets\/app\.js" defer><\/script>/);
 });
@@ -219,10 +220,10 @@ test("favicon is the local Direction A stepped equity mark", () => {
 test("landing head links one Direction A icon family and its manifest", () => {
   assert.equal((html.match(/rel="icon"/g) || []).length, 2, "expected the SVG and ICO icon links");
   assert.equal((html.match(/rel="manifest"/g) || []).length, 1, "expected exactly one manifest link");
-  assert.match(html, /<link rel="icon" href="assets\/favicon\.svg" type="image\/svg\+xml">/);
-  assert.match(html, /<link rel="icon" href="assets\/icons\/favicon\.ico" sizes="any">/);
-  assert.match(html, /<link rel="apple-touch-icon" href="assets\/icons\/apple-touch-icon\.png">/);
-  assert.match(html, /<link rel="manifest" href="assets\/icons\/manifest\.webmanifest">/);
+  assert.match(html, /<link rel="icon" href="\/favicon\.ico" sizes="16x16 32x32 48x48">/);
+  assert.match(html, /<link rel="icon" href="\/landing-light\.svg" type="image\/svg\+xml">/);
+  assert.match(html, /<link rel="apple-touch-icon" href="\/landing-light-apple-touch-180\.png">/);
+  assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest">/);
   assert.match(html, /<meta name="theme-color" content="#E6E4DE" media="\(prefers-color-scheme: light\)">/);
   assert.match(html, /<meta name="theme-color" content="#15181D" media="\(prefers-color-scheme: dark\)">/);
 });

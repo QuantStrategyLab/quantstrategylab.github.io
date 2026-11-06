@@ -1,7 +1,7 @@
 // Deterministic, dependency-free builder for the Direction A "Chart series" icon package.
 // Run with `node scripts/build-site-icons.mjs` (also wired as npm pretest).
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
@@ -9,6 +9,7 @@ import {
   CONTRAST_THRESHOLDS,
   NORMAL_PLATE,
   SITES,
+  SITE_BY_KEY,
   SMALL_PLATE,
   contrastForSite,
   hexToRgb
@@ -22,8 +23,30 @@ for (const site of SITES.filter((site) => site.key !== "meridian-console")) {
   }
 }
 const PACKAGE_ROOT = path.join(ROOT, "site-icons");
-const LANDING_ICON_DIR = path.join(ROOT, "site", "assets", "icons");
-const LANDING_SVG = path.join(ROOT, "site", "assets", "favicon.svg");
+const SITE_ROOT = path.join(ROOT, "site");
+
+// The published landing uses the `.design` USAGE.md file names and is served from
+// the site root, so every reference is root-relative and /favicon.ico resolves.
+const LANDING_USAGE_NAMES = {
+  "icon.svg": "landing-light.svg",
+  "favicon.ico": "favicon.ico",
+  "apple-touch-icon.png": "landing-light-apple-touch-180.png",
+  "icon-192.png": "landing-light-192.png",
+  "icon-512.png": "landing-light-512.png",
+  "icon-maskable-512.png": "landing-light-maskable-512.png"
+};
+
+// Pre-usage landing layout: the `assets/` folder is not the site root, so nothing
+// there ever answered the implicit /favicon.ico request.
+const LEGACY_LANDING_FILES = [
+  path.join("assets", "favicon.svg"),
+  path.join("assets", "icons", "favicon.ico"),
+  path.join("assets", "icons", "apple-touch-icon.png"),
+  path.join("assets", "icons", "icon-192.png"),
+  path.join("assets", "icons", "icon-512.png"),
+  path.join("assets", "icons", "icon-maskable-512.png"),
+  path.join("assets", "icons", "manifest.webmanifest")
+];
 
 // ---------------------------------------------------------------------------
 // PNG / ICO encoders (no native dependencies)
@@ -480,18 +503,36 @@ function manifestFor(site) {
   };
 }
 
+function landingManifest() {
+  const manifest = manifestFor(SITE_BY_KEY["organisation-landing"]);
+  return {
+    ...manifest,
+    icons: manifest.icons.map((icon) => ({ ...icon, src: `/${LANDING_USAGE_NAMES[icon.src]}` }))
+  };
+}
+
 function snippetFor(site) {
+  const landing = site.key === "organisation-landing";
   const base = site.assetBase;
-  const svgPath = site.key === "organisation-landing" ? "assets/favicon.svg" : `${base}/icon.svg`;
-  const rasterBase = site.key === "organisation-landing" ? "assets/icons" : base;
+  const svgPath = landing ? `/${LANDING_USAGE_NAMES["icon.svg"]}` : `${base}/icon.svg`;
+  const icoPath = landing ? `/${LANDING_USAGE_NAMES["favicon.ico"]}` : `${base}/favicon.ico`;
+  const applePath = landing
+    ? `/${LANDING_USAGE_NAMES["apple-touch-icon.png"]}`
+    : `${base}/apple-touch-icon.png`;
+  const manifestPath = landing ? "/manifest.webmanifest" : `${base}/manifest.webmanifest`;
+  const icoLink = landing
+    ? `<link rel="icon" href="${icoPath}" sizes="16x16 32x32 48x48">`
+    : `<link rel="icon" href="${icoPath}" sizes="any">`;
+  const iconLinks = landing
+    ? `${icoLink}\n<link rel="icon" href="${svgPath}" type="image/svg+xml">`
+    : `<link rel="icon" href="${svgPath}" type="image/svg+xml">\n${icoLink}`;
   return `<!-- ${site.englishName} — Direction A "Chart series" icons.
      en: ${site.englishName}
      zh-CN: ${site.chineseName}
      Replace the existing favicon and manifest links with this block; keep exactly one manifest link. -->
-<link rel="icon" href="${svgPath}" type="image/svg+xml">
-<link rel="icon" href="${rasterBase}/favicon.ico" sizes="any">
-<link rel="apple-touch-icon" href="${rasterBase}/apple-touch-icon.png">
-<link rel="manifest" href="${rasterBase}/manifest.webmanifest">
+${iconLinks}
+<link rel="apple-touch-icon" href="${applePath}">
+<link rel="manifest" href="${manifestPath}">
 <meta name="theme-color" content="${site.palette.themeLight}" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="${site.palette.themeDark}" media="(prefers-color-scheme: dark)">
 `;
@@ -819,22 +860,25 @@ function main() {
   assertPng(previewPng, preview.width, preview.height, "preview.png");
   writeBinary("preview.png", previewPng);
 
-  const landing = SITES.find((site) => site.key === "organisation-landing");
-  const landingMaster = svgFor(landing, "normal");
-  mkdirSync(path.dirname(LANDING_SVG), { recursive: true });
-  writeFileSync(LANDING_SVG, landingMaster, "utf8");
-  mkdirSync(LANDING_ICON_DIR, { recursive: true });
-  for (const name of ["favicon.ico", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-maskable-512.png"]) {
-    writeFileSync(path.join(LANDING_ICON_DIR, name), readFileSync(path.join(PACKAGE_ROOT, landing.dir, name)));
+  const landing = SITE_BY_KEY["organisation-landing"];
+  const landingDir = path.join(PACKAGE_ROOT, landing.dir);
+  mkdirSync(SITE_ROOT, { recursive: true });
+  for (const [packageName, servedName] of Object.entries(LANDING_USAGE_NAMES)) {
+    writeFileSync(path.join(SITE_ROOT, servedName), readFileSync(path.join(landingDir, packageName)));
   }
-  writeFileSync(
-    path.join(LANDING_ICON_DIR, "manifest.webmanifest"),
-    readFileSync(path.join(PACKAGE_ROOT, landing.dir, "manifest.webmanifest.json"))
-  );
+  writeFileSync(path.join(SITE_ROOT, "manifest.webmanifest"), `${JSON.stringify(landingManifest(), null, 2)}\n`);
+  // The pre-usage landing family must not survive a rebuild: two icon families in
+  // one tree is how the stale references and the /favicon.ico 404 were missed.
+  for (const stale of LEGACY_LANDING_FILES) {
+    const target = path.join(SITE_ROOT, stale);
+    if (existsSync(target)) rmSync(target);
+  }
+  const legacyDir = path.join(SITE_ROOT, "assets", "icons");
+  if (existsSync(legacyDir) && readdirSync(legacyDir).length === 0) rmdirSync(legacyDir);
 
   console.log(`Built ${SITES.length} Direction A icon sets under site-icons/`);
   console.log(`Preview: ${preview.width}x${preview.height}px`);
-  console.log("Landing assets: site/assets/favicon.svg + site/assets/icons/*");
+  console.log("Landing assets: site/ root (Direction A usage names) + /favicon.ico");
 }
 
 main();

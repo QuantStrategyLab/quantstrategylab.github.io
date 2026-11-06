@@ -67,7 +67,8 @@ npm run build:icons
 verification suite. Output is deterministic for a given Node runtime, so a
 clean rebuild reproduces the same assets (including the compressed PNG bytes);
 ICOs are written from those same PNG buffers. The organisation-landing set is
-also copied to `site/assets/` (`favicon.svg` plus `site/assets/icons/`) by the
-builder; that copy is the live landing favicon.
+also published to the served root, `site/`, under the `.design` USAGE.md names
+(`/favicon.ico`, `/landing-light.*`, `/manifest.webmanifest`); that copy is the
+live landing icon family.
 
 See `install.md` for per-site integration and cleanup.
