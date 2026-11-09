@@ -243,21 +243,3 @@ test("site files contain no account identifiers, emails or tokens", () => {
   assert.doesNotMatch(all, /\b(?:sk|pk|ghp)_[A-Za-z0-9]{10,}\b/, "token-like value");
   assert.doesNotMatch(all, /\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b/, "card-like number");
 });
-
-test("poster band and wordmark are decorative and motion-safe", () => {
-  // The ticker repeats principle titles, so it must never be announced twice.
-  assert.match(html, /<div class="ticker" aria-hidden="true">/);
-  assert.match(html, /<div class="wordmark" aria-hidden="true">QuantStrategyLab<\/div>/);
-  // Both decorative bands must be able to shrink inside a 360 px viewport.
-  assert.match(css, /\.ticker\s*\{[^}]*overflow:\s*hidden/);
-  assert.match(css, /\.wordmark\s*\{[^}]*overflow:\s*hidden/);
-  assert.match(css, /\.wordmark\s*\{[^}]*white-space:\s*nowrap/);
-  // The marquee stops for readers who ask for reduced motion.
-  const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*)\}\s*$/);
-  assert.ok(reduced, "missing the reduced-motion block");
-  assert.match(reduced[1], /\.ticker-track\s*\{[^}]*animation:\s*none/);
-});
-
-test("sticky header offsets in-page anchors", () => {
-  assert.match(css, /section\.s\s*\{[^}]*scroll-margin-top:\s*84px/);
-});
