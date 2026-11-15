@@ -35,6 +35,7 @@ QuantStrategyLab 官网。静态站点，没有框架、没有服务端渲染、
 
 ```bash
 npm test
+python3 scripts/test_style.py && python3 scripts/check_style.py --phase 2
 ```
 
 `pretest` 会先跑 `build:icons`，所以这条命令同时验证图标能重新生成。改动只涉及文案时可只跑相关用例，并在 PR 里说明未跑的部分。
@@ -44,3 +45,4 @@ npm test
 - 站点是公开的：不写真实账号、内网主机名、个人子域名或部署机路径。
 - 图标改动必须符合 `site-icons/spec` 的几何与对比度要求，测试会检查。
 - 只有 `site/` 会被发布；不要把仅供内部查看的材料放进 `site/`。
+- 仅当安装、配置或对外行为变化时更新 `README.md`，不在其中写 `this PR`、`remains unchanged` 或阶段流水线编号。
