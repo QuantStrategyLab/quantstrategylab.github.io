@@ -670,24 +670,31 @@ def blank_fenced_blocks(text: str) -> str:
     return FENCED_BLOCK.sub(blank, text)
 
 
-DEPLOYED_SITE_TEXT_SUFFIXES = {
-    ".html", ".htm", ".js", ".mjs", ".css", ".svg", ".json", ".webmanifest", ".txt", ".xml",
-}
-
-
-def is_deployed_site_text(root: Path, path: Path) -> bool:
-    """Return True for textual static-site assets published directly from site/."""
+def read_deployed_site_text(root: Path, path: Path) -> str | None:
+    """Return UTF-8 text for any decodable non-binary file published under site/."""
     rel = path.relative_to(root).as_posix()
-    return rel.startswith("site/") and path.suffix.lower() in DEPLOYED_SITE_TEXT_SUFFIXES
+    if not rel.startswith("site/"):
+        return None
+    raw = path.read_bytes()
+    if b"\x00" in raw:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def check_leaks(root: Path, report: Report) -> None:
     for path in iter_files(root):
         markdown = is_markdown(path)
-        if not markdown and not is_deployed_site_text(root, path):
-            continue
+        if markdown:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        else:
+            site_text = read_deployed_site_text(root, path)
+            if site_text is None:
+                continue
+            text = site_text
         rel = path.relative_to(root).as_posix()
-        text = path.read_text(encoding="utf-8", errors="ignore")
         prose = blank_fenced_blocks(text) if markdown else text
         masked = blank_code_spans(prose) if markdown else text
         ctx = FileContext(

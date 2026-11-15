@@ -176,20 +176,26 @@ class LeakTest(CheckerTestCase):
 
     def test_deployed_site_text_assets_are_scanned_for_identifier_leaks(self):
         self.write("site/index.html", '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n')
+        (self.root / "site/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
         clean_report = self.report()
         check_style.check_leaks(self.root, clean_report)
         self.assertEqual(clean_report.findings, [])
 
         self.write(
-            "site/index.html",
-            '<!-- deploy from /home/operator/prod/config -->\n'
-            '<script>const api = "https://ops-portal.workers.dev";</script>\n',
+            "site/runtime-config.yaml",
+            "config_dir: /home/operator/prod/config\n"
+            "endpoint: https://actual-private-app.workers.dev\n",
+        )
+        self.write(
+            "site/assets/app.js.map",
+            '{"sourceRoot":"gs://actual-prod-bucket/maps"}\n',
         )
         dirty_report = self.report()
         check_style.check_leaks(self.root, dirty_report)
         msgs = [m for _, m in dirty_report.findings]
-        self.assertTrue(any("personal subdomain" in m for m in msgs))
-        self.assertTrue(any("absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/runtime-config.yaml" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/runtime-config.yaml" in m and "personal subdomain" in m for m in msgs))
+        self.assertTrue(any("site/assets/app.js.map" in m and "non-placeholder bucket" in m for m in msgs))
 
     def test_sha_in_url_is_not_reported(self):
         text = (
