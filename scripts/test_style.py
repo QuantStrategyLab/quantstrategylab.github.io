@@ -218,6 +218,9 @@ class LeakTest(CheckerTestCase):
         clean_png = make_png()
         self.write(
             "site/index.html",
+            '<link rel="stylesheet" href="assets/styles.css">\n'
+            '<script src="assets/i18n.js" defer></script>\n'
+            '<script src="assets/app.js" defer></script>\n'
             '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n'
             "<p>Visit QuantStrategyLab.</p>\n"
             "<p>Public architecture notes.</p>\n",
@@ -232,6 +235,10 @@ class LeakTest(CheckerTestCase):
         self.write("site/YOUR_SUBDOMAIN.workers.dev/index.html", "<p>placeholder path</p>\n")
         (self.root / "site/landing-light-192.png").write_bytes((repo_root / "site/landing-light-192.png").read_bytes())
         (self.root / "site/favicon.ico").write_bytes((repo_root / "site/favicon.ico").read_bytes())
+        (self.root / "site/assets").mkdir(parents=True, exist_ok=True)
+        (self.root / "site/assets/app.js").write_bytes((repo_root / "site/assets/app.js").read_bytes())
+        (self.root / "site/assets/i18n.js").write_bytes((repo_root / "site/assets/i18n.js").read_bytes())
+        self.write("site/unused.css", "p { display: none; }\n")
         clean_report = self.report()
         check_style.check_leaks(self.root, clean_report)
         self.assertEqual(clean_report.findings, [])
@@ -393,6 +400,48 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/data-uri.html" in m and "embedded data URI asset" in m for m in msgs))
         self.assertTrue(any("site/actual-private-app.workers.dev/index.html" in m and "personal subdomain" in m for m in msgs))
         self.assertTrue(any("site/db-primary.ops.internal/cfg.html" in m and "internal hostname" in m for m in msgs))
+
+        self.write(
+            "site/mixed-case.json",
+            '{"url": "HTTPS://REAL-LEAK.WORKERS.DEV", "bucket": "GS://CORP-QUANT-BUCKET", '
+            '"arn": "ARN:AWS:IAM::123456789012:ROLE/OPS", '
+            '"sa": "DEPLOY@CORP-QUANT-PROD.IAM.GSERVICEACCOUNT.COM"}\n',
+        )
+        self.write("site/a.css", ".vis-box { display: flex; } .f1 { order: 2; } .f2 { order: 1; }\n")
+        self.write("site/z.css", ".vis-box { display: none; }\n")
+        self.write(
+            "site/linked-css.html",
+            '<link rel="stylesheet" href="a.css">\n'
+            '<div class="vis-box"><span class="f1">/alice/secret</span><span class="f2">/Users</span></div>\n',
+        )
+        self.write("site/indirect.js", 'const p = ["/U", "sers/", "bob"].join("");\n')
+        self.write("site/inline-js.html", '<script>const p = ["/U", "sers/", "bob"].join("");</script>\n')
+        self.write(
+            "site/media-order.html",
+            "<style>\n"
+            ".mwrap { display: flex; }\n"
+            "@media (max-width: 600px) { .ma { order: 2; } .mb { order: 1; } }\n"
+            "@media (min-width: 601px) { .ma { order: 1; } .mb { order: 2; } }\n"
+            "</style>\n"
+            '<div class="mwrap"><span class="ma">/alice/mobile</span><span class="mb">/Users</span></div>\n',
+        )
+        self.write("site/nonpixel-media.css", "@media (prefers-color-scheme: dark) { .hid { display: none; } }\n")
+        self.write("site/bad-handler.html", '<img src="landing-light-192.png" onclick="evil()"><a href="javascript:evil()">x</a>\n')
+
+        extra_report = self.report()
+        check_style.check_leaks(self.root, extra_report)
+        extra_msgs = [f"{cat}: {detail}" for cat, detail in extra_report.findings]
+        self.assertTrue(any("site/mixed-case.json" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/mixed-case.json" in m and "non-placeholder bucket" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/mixed-case.json" in m and "account identifier" in m and "ARN:AWS:" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/mixed-case.json" in m and "account identifier" in m and "DEPLOY@CORP-QUANT-PROD" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/linked-css.html" in m and "absolute home path" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/indirect.js" in m and "unapproved or uninspected executable script" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/inline-js.html" in m and "unapproved executable inline script" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/media-order.html" in m and "absolute home path" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/nonpixel-media.css" in m and "non-pixel conditional layout rule" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/bad-handler.html" in m and "inline event handler attribute" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/bad-handler.html" in m and "javascript: or vbscript: URI" in m for m in extra_msgs), extra_msgs)
 
     def test_sha_in_url_is_not_reported(self):
         text = (

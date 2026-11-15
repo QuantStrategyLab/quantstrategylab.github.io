@@ -35,6 +35,7 @@ import fnmatch
 import hashlib
 import html
 import ipaddress
+import posixpath
 import re
 import struct
 import subprocess
@@ -127,7 +128,7 @@ PLACEHOLDER_SUBDOMAIN = re.compile(
     r"|^x{2,}$"
 )
 
-URL_TOKEN = re.compile(r"https?://[^\s)\]\"'<>`]+")
+URL_TOKEN = re.compile(r"https?://[^\s)\]\"'<>`]+", re.IGNORECASE)
 FENCED_BLOCK = re.compile(r"^```.*?^```", re.DOTALL | re.MULTILINE)
 
 
@@ -151,7 +152,7 @@ def phrase_is_prose(text: str, match: re.Match, ctx: FileContext) -> bool:
 
 
 def bucket_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
-    bucket = match.group(0)[len("gs://"):].split("/", 1)[0]
+    bucket = match.group(0)[len("gs://"):].split("/", 1)[0].lower()
     # A sentence-final period is punctuation, not part of the name. An ellipsis
     # is the placeholder, so it must survive this.
     if bucket.endswith(".") and not bucket.endswith("..."):
@@ -248,7 +249,7 @@ def hex_is_prose(text: str, match: re.Match, ctx: FileContext) -> bool:
 # findings across the organisation and not one of them was a defect, which is
 # the same as having no rule: the report gets scrolled past.
 LEAK_PATTERNS = [
-    (re.compile(r"(?<![\w.])/(?:Users|home)/[^\s`)\]\"'<>|]{2,}"),
+    (re.compile(r"(?<![\w.])/(?i:users|home)/[^\s`)\]\"'<>|]{2,}"),
      "paths", "absolute home path (section 13)", home_path_is_real),
     (re.compile(
         r"(?:(?<![A-Za-z0-9_])[A-Za-z]:(?:\\+|/)[^\s`)\]\"'<>|]{2,}"
@@ -256,9 +257,9 @@ LEAK_PATTERNS = [
         r"|//(?:<[^>]+>|\{[^}]+\}|[A-Za-z0-9$%_-]+)/(?:<[^>]+>|\{[^}]+\}|[A-Za-z0-9$.%_-]+)(?:/[^\s`)\]\"'<>|]*)*))"
      ),
      "paths", "Windows deployment path (section 13)", windows_path_is_real),
-    (re.compile(r"\bgs://[^\s`)\]\"'<>]+"),
+    (re.compile(r"\bgs://[^\s`)\]\"'<>]+", re.IGNORECASE),
      "content", "non-placeholder bucket (section 13)", bucket_is_real),
-    (re.compile(r"\b[\w-]+\.workers\.dev\b"),
+    (re.compile(r"\b[\w-]+\.workers\.dev\b", re.IGNORECASE),
      "publish", "personal subdomain (section 13)", subdomain_is_real),
     (re.compile(r"\b[0-9a-f]{40}\b"),
      "content", "40-character hex string in prose (section 5)", hex_is_prose),
@@ -746,6 +747,35 @@ APPROVED_SITE_RASTERS: dict[str, list[tuple[int, int, int, int, int, str]]] = {
     ],
 }
 
+SITE_SCRIPT_SUFFIXES = {".js", ".mjs", ".cjs"}
+APPROVED_SITE_SCRIPT_FILES: dict[str, str] = {
+    "site/assets/app.js": "a38c89a342115396fc79960771a77eb63e314dc6874fdcad46529dead36a6408",
+    "site/assets/i18n.js": "0e6946cbdaf887fb790cae6c05992dff0575e99328dd02968374d4a09b35dda5",
+}
+APPROVED_SITE_INLINE_SCRIPTS: set[str] = {
+    "df216a14d05020b1d67c017b9252c0390dcfd70f727e188f42d8b92ac557637f",
+}
+
+
+def resolve_site_asset_href(page_rel: str, href: str) -> str | None:
+    """Resolve a site/-local HTML href against page_rel; return None for external or escaping targets."""
+    raw = href.strip()
+    if not raw or raw.startswith("//") or "\\" in raw:
+        return None
+    clean = raw.split("#", 1)[0].split("?", 1)[0].strip()
+    if not clean or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", clean):
+        return None
+    sub_page = page_rel[len("site/"):] if page_rel.startswith("site/") else page_rel
+    if clean.startswith("/"):
+        rel_in_site = posixpath.normpath(clean.lstrip("/"))
+    else:
+        base_dir = posixpath.dirname(sub_page)
+        joined = posixpath.join(base_dir, clean) if base_dir else clean
+        rel_in_site = posixpath.normpath(joined)
+    if rel_in_site in ("", ".", "..") or rel_in_site.startswith("../"):
+        return None
+    return "site/" + rel_in_site
+
 
 def unfilter_png_scanlines(
     decomp: bytes, width: int, height: int, bit_depth: int, color_type: int
@@ -947,8 +977,22 @@ def inspect_ico_asset(
     return "\n".join(parts), sigs, clean_all
 
 
+def _decode_site_text(raw: bytes) -> tuple[str, str | None]:
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return "text", raw.decode("utf-16")
+        except UnicodeDecodeError:
+            return "unscanned_binary", None
+    if b"\x00" in raw:
+        return "unscanned_binary", None
+    try:
+        return "text", raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "unscanned_binary", None
+
+
 def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
-    """Return ('text', str), ('unapproved_raster', str), ('skip', None), or ('unscanned_binary', None)."""
+    """Return ('text', str), ('unapproved_raster', str), ('unapproved_script', str), ('skip', None), or ('unscanned_binary', None)."""
     rel = path.relative_to(root).as_posix()
     if not rel.startswith("site/"):
         return "skip", None
@@ -972,17 +1016,14 @@ def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
         return "unapproved_raster", text
     if suffix == ".pdf":
         return "unscanned_binary", None
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            return "text", raw.decode("utf-16")
-        except UnicodeDecodeError:
-            return "unscanned_binary", None
-    if b"\x00" in raw:
+    text_status, text = _decode_site_text(raw)
+    if text_status != "text" or text is None:
         return "unscanned_binary", None
-    try:
-        return "text", raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return "unscanned_binary", None
+    if suffix in SITE_SCRIPT_SUFFIXES:
+        if hashlib.sha256(raw).hexdigest() == APPROVED_SITE_SCRIPT_FILES.get(rel):
+            return "text", text
+        return "unapproved_script", text
+    return "text", text
 
 
 INTERNAL_IPV4_NETWORKS = (
@@ -1092,7 +1133,15 @@ DISALLOWED_SITE_HTML_RE = [
     (re.compile(r"(?i)\bdir\s*=\s*[\"']?\s*(?:rtl|auto)\b"), "HTML non-LTR dir attribute"),
     (re.compile(r"(?i)<\s*(?:text|tspan|textPath|foreignObject)\b"), "SVG positioned text or foreignObject element"),
     (re.compile(r"(?i)<\s*(?:iframe|object|embed)\b"), "embedded browsing context in site/"),
-    (re.compile(r"(?i)<\s*(?:link\b[^>]*rel\s*=\s*[\"']?stylesheet[^>]*href|script\b[^>]*src)\s*=\s*[\"']?(?:https?:|//)"), "remote stylesheet or script in site/"),
+    (re.compile(r"(?i)<\s*base\b"), "HTML base href element in site/"),
+    (re.compile(r"(?i)<\s*meta\b[^>]*\bhttp-equiv\b"), "HTML meta http-equiv element in site/"),
+    (
+        re.compile(
+            r"(?i)<\s*(?:link\b[^>]*rel\s*=\s*[\"']?[^>]*\bstylesheet\b[^>]*\bhref|script\b[^>]*\bsrc)"
+            r"\s*=\s*[\"']?(?:https?:|//|data:|javascript:|vbscript:)"
+        ),
+        "remote or inline-scheme stylesheet or script in site/",
+    ),
 ]
 
 
@@ -1300,15 +1349,67 @@ def parse_simple_selector(sel: str):
     return (chain if chain else None), (spec_ids, spec_cls, spec_tags)
 
 
+def parse_media_interval(prelude: str) -> tuple[float, float, bool]:
+    """Parse @media pixel-width bounds; mark non-pixel/complex queries unresolvable."""
+    q = prelude.strip()
+    if q.lower().startswith("@media"):
+        q = q[6:].strip()
+    if not q or "," in q or " or " in f" {q.lower()} ":
+        return 0.0, float("inf"), True
+    parts = [p.strip() for p in re.split(r"(?i)\band\b", q) if p.strip()]
+    lo, hi = 0.0, float("inf")
+    unres = False
+    for part in parts:
+        pl = part.lower()
+        if pl in ("all", "screen", "only screen", "only all"):
+            continue
+        m = re.match(
+            r"^\(\s*(min-width|max-width|width)\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*px\s*\)$",
+            pl,
+        )
+        if m:
+            kind, val = m.group(1), float(m.group(2))
+            if kind == "min-width":
+                lo = max(lo, val)
+            elif kind == "max-width":
+                hi = min(hi, val)
+            else:
+                lo = max(lo, val)
+                hi = min(hi, val)
+            continue
+        m_cmp = re.match(
+            r"^\(\s*width\s*(<=|>=|<|>|=)\s*([0-9]+(?:\.[0-9]+)?)\s*px\s*\)$",
+            pl,
+        )
+        if m_cmp:
+            op, val = m_cmp.group(1), float(m_cmp.group(2))
+            if op == "<=":
+                hi = min(hi, val)
+            elif op == "<":
+                hi = min(hi, max(0.0, val - 0.1))
+            elif op == ">=":
+                lo = max(lo, val)
+            elif op == ">":
+                lo = max(lo, val + 0.1)
+            else:
+                lo = max(lo, val)
+                hi = min(hi, val)
+            continue
+        unres = True
+    return lo, hi, unres
+
+
 def parse_css_stylesheet(
     css_text: str,
-    in_media: bool = False,
+    media_iv: tuple[float, float] = (0.0, float("inf")),
+    unresolvable_cond: bool = False,
     start_idx: int = 0,
+    in_at_rule: bool = False,
 ) -> tuple[list, list[str], int]:
     """Parse stylesheet rules for visual-order reconstruction and flag unsafe layout rules."""
     clean = CSS_COMMENT_RE.sub("", unescape_css_literals(css_text))
     rules: list = []
-    issues: list[str] = [] if in_media else _check_css_safety(clean)
+    issues: list[str] = [] if in_at_rule else _check_css_safety(clean)
     idx = start_idx
     layout_keys = {"display", "order", "grid-row", "grid-column", "grid-cols", "visibility", "opacity"}
     i, n = 0, len(clean)
@@ -1330,8 +1431,27 @@ def parse_css_stylesheet(
         if not prelude:
             continue
         if prelude.startswith("@"):
-            if prelude.lower().startswith(("@media", "@supports", "@layer", "@container")):
-                sub_rules, sub_issues, idx = parse_css_stylesheet(body, in_media=True, start_idx=idx)
+            pl_low = prelude.lower()
+            if pl_low.startswith("@media"):
+                c_lo, c_hi, c_unres = parse_media_interval(prelude)
+                sub_iv = (max(media_iv[0], c_lo), min(media_iv[1], c_hi))
+                sub_rules, sub_issues, idx = parse_css_stylesheet(
+                    body,
+                    media_iv=sub_iv,
+                    unresolvable_cond=unresolvable_cond or c_unres,
+                    start_idx=idx,
+                    in_at_rule=True,
+                )
+                rules.extend(sub_rules)
+                issues.extend(sub_issues)
+            elif pl_low.startswith(("@supports", "@layer", "@container", "@scope", "@starting-style")):
+                sub_rules, sub_issues, idx = parse_css_stylesheet(
+                    body,
+                    media_iv=media_iv,
+                    unresolvable_cond=True,
+                    start_idx=idx,
+                    in_at_rule=True,
+                )
                 rules.extend(sub_rules)
                 issues.extend(sub_issues)
             continue
@@ -1340,6 +1460,8 @@ def parse_css_stylesheet(
         fs_val = props.get("font-size", ("", False))[0]
         has_zero_font = isinstance(fs_val, str) and bool(re.match(r"^0(?:\.0+)?(?:[a-z%]+)?$", fs_val))
         has_layout_prop = has_zero_font or any(k in props for k in layout_keys)
+        if has_layout_prop and unresolvable_cond:
+            issues.append(f"non-pixel conditional layout rule ({prelude[:36]})")
         for sel in prelude.split(","):
             sel = sel.strip()
             if not sel:
@@ -1350,7 +1472,7 @@ def parse_css_stylesheet(
                     issues.append(f"complex CSS visual-order selector ({sel[:36]})")
             else:
                 idx += 1
-                rules.append((chain, spec, idx, props, in_media))
+                rules.append((chain, spec, idx, props, media_iv))
     return rules, issues, idx
 
 
@@ -1402,11 +1524,16 @@ def _matches_chain(node: _DOMNode, chain) -> bool:
     return True
 
 
-def compute_node_style(node: _DOMNode, rules: list | tuple, include_media: bool) -> dict[str, object]:
-    """Compute cascaded CSS properties on a DOM node using selector specificity."""
+def compute_node_style(
+    node: _DOMNode, rules: list | tuple, viewport_w: float | None = None
+) -> dict[str, object]:
+    """Compute cascaded CSS properties on a DOM node using selector specificity and viewport width."""
     resolved: dict[str, tuple[tuple[int, int, int, int, int, int], object]] = {}
-    for chain, spec, r_idx, props, in_media in rules:
-        if in_media and not include_media:
+    for chain, spec, r_idx, props, (lo, hi) in rules:
+        if viewport_w is None:
+            if lo > 0.0 or hi < float("inf"):
+                continue
+        elif not (lo <= viewport_w <= hi):
             continue
         if _matches_chain(node, chain):
             for prop, (val, imp) in props.items():
@@ -1450,7 +1577,7 @@ _TABLE_SECTION_ORDER = {
 def serialize_visual_tree(
     root_node: _DOMNode,
     rules: list | tuple,
-    include_media: bool,
+    viewport_w: float | None,
     respect_order: bool,
     skip_hidden: bool,
     i18n_map: dict[str, str] | None = None,
@@ -1466,7 +1593,7 @@ def serialize_visual_tree(
                 if ch:
                     items.append(("text", ch, {}))
             else:
-                st = compute_node_style(ch, rules, include_media)
+                st = compute_node_style(ch, rules, viewport_w)
                 if skip_hidden and _is_hidden_node(ch, st):
                     continue
                 if respect_order and st.get("display") == "contents":
@@ -1489,7 +1616,7 @@ def serialize_visual_tree(
             )
             return [(k, o, s) for _, k, o, s in meaningful]
 
-        parent_st = compute_node_style(container, rules, include_media) if container.tag != "__root__" else {}
+        parent_st = compute_node_style(container, rules, viewport_w) if container.tag != "__root__" else {}
         disp = str(parent_st.get("display", "")).lower()
         is_flex = "flex" in disp
         is_grid = "grid" in disp
@@ -1598,13 +1725,17 @@ class _RenderedHTMLNormalizer(HTMLParser):
         self.attr_lines: list[str] = []
         self.comment_lines: list[str] = []
         self.subtrees: list[str] = []
-        self.style_blocks: list[str] = []
+        self.stylesheet_entries: list[tuple[str, str, str]] = []
+        self.script_tags: list[tuple[str | None, str]] = []
         self.inline_css_issues: list[str] = []
+        self.html_issues: list[str] = []
         self.dom_root = _DOMNode("__root__", {})
         self._dom_stack: list[_DOMNode] = [self.dom_root]
         self._tag_stack: list[tuple[str, bool]] = []
         self._raw_tag: str | None = None
         self._raw_chunks: list[str] = []
+        self._raw_media: str = ""
+        self._raw_src: str | None = None
 
     @staticmethod
     def _has_inline_display(attrs: list[tuple[str, str | None]]) -> bool:
@@ -1615,17 +1746,23 @@ class _RenderedHTMLNormalizer(HTMLParser):
 
     def _handle_attrs(self, attrs: list[tuple[str, str | None]]) -> None:
         for k, v in attrs:
+            kl = k.lower()
+            if re.match(r"^on[a-z]{2,}$", kl):
+                self.html_issues.append(f"inline event handler attribute in site/ ({kl})")
             if not v:
                 continue
+            compact_val = re.sub(r"[\x00-\x20]+", "", v)
+            if re.match(r"^(?:javascript|vbscript):", compact_val, re.IGNORECASE):
+                self.html_issues.append("javascript: or vbscript: URI attribute in site/")
             self.attr_lines.append(f"{k}={v}")
             if "%" in v:
                 self.attr_lines.append(f"{k}={urllib.parse.unquote(v)}")
-            if k.lower() == "style":
+            if kl == "style":
                 clean_s = CSS_COMMENT_RE.sub("", unescape_css_literals(v))
                 self.inline_css_issues.extend(_check_css_safety(clean_s))
                 _, bad_vals = parse_style_decls(clean_s)
                 self.inline_css_issues.extend(f"non-literal CSS visual-order value ({bv})" for bv in bad_vals)
-            if k.lower() == "srcdoc" and self.depth < 3:
+            if kl == "srcdoc" and self.depth < 3:
                 self.subtrees.append(normalize_html_text(v, self.depth + 1))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -1640,9 +1777,18 @@ class _RenderedHTMLNormalizer(HTMLParser):
         if is_block:
             self.inline_parts.append("\n")
         self._handle_attrs(attrs)
-        if t in ("script", "style"):
+        if t == "link":
+            rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
+            if "stylesheet" in rel_tokens:
+                self.stylesheet_entries.append(("link", ad.get("href", "").strip(), ad.get("media", "").strip()))
+        elif t == "style":
             self._raw_tag = t
             self._raw_chunks = []
+            self._raw_media = ad.get("media", "").strip()
+        elif t == "script":
+            self._raw_tag = t
+            self._raw_chunks = []
+            self._raw_src = ad["src"] if "src" in ad else None
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
@@ -1652,16 +1798,25 @@ class _RenderedHTMLNormalizer(HTMLParser):
         if (t in HTML_BLOCK_TAGS) and not self._has_inline_display(attrs):
             self.inline_parts.append("\n")
         self._handle_attrs(attrs)
+        if t == "link":
+            rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
+            if "stylesheet" in rel_tokens:
+                self.stylesheet_entries.append(("link", ad.get("href", "").strip(), ad.get("media", "").strip()))
+        elif t == "script":
+            self.script_tags.append((ad["src"] if "src" in ad else None, ""))
 
     def _flush_raw_tag(self, tag_name: str) -> None:
         raw_body = "".join(self._raw_chunks)
         if tag_name == "script":
+            self.script_tags.append((self._raw_src, raw_body))
+            self._raw_src = None
             dec = fold_js_expressions(raw_body)
             self.subtrees.append(dec)
             if ("<" in dec or "&" in dec) and self.depth < 3:
                 self.subtrees.append(normalize_html_text(dec, self.depth + 1))
         elif tag_name == "style":
-            self.style_blocks.append(raw_body)
+            self.stylesheet_entries.append(("inline", raw_body, self._raw_media))
+            self._raw_media = ""
             self.subtrees.append(unescape_css_literals(raw_body))
         self._raw_tag = None
         self._raw_chunks = []
@@ -1696,11 +1851,63 @@ class _RenderedHTMLNormalizer(HTMLParser):
     def handle_comment(self, data: str) -> None:
         self.comment_lines.append(html.unescape(data))
 
+    def unknown_decl(self, data: str) -> None:
+        if data.startswith("CDATA["):
+            self.handle_data(data[len("CDATA["):])
+
+
+def _collect_page_stylesheet_rules(
+    page_rel: str,
+    stylesheet_entries: list[tuple[str, str, str]],
+    css_by_rel: dict[str, str] | None = None,
+) -> tuple[list, list[str], set[float]]:
+    """Resolve linked and inline stylesheets for one page in document order."""
+    rules: list = []
+    issues: list[str] = []
+    breakpoints: set[float] = set()
+    idx_base = 0
+    for kind, content, media_attr in stylesheet_entries:
+        if media_attr.strip():
+            m_lo, m_hi, m_unres = parse_media_interval("@media " + media_attr)
+            base_iv: tuple[float, float] = (m_lo, m_hi)
+        else:
+            base_iv = (0.0, float("inf"))
+            m_unres = False
+        css_src = ""
+        if kind == "link":
+            resolved = resolve_site_asset_href(page_rel, content)
+            if resolved is None:
+                issues.append(f"external or escaping stylesheet link ({content[:36]})")
+                continue
+            if css_by_rel is not None:
+                if resolved not in css_by_rel:
+                    issues.append(f"missing local stylesheet link ({content[:36]})")
+                    continue
+                css_src = css_by_rel[resolved]
+        else:
+            css_src = content
+        if css_src:
+            p_rules, p_issues, idx_base = parse_css_stylesheet(
+                css_src, media_iv=base_iv, unresolvable_cond=m_unres, start_idx=idx_base
+            )
+            rules.extend(p_rules)
+            if kind == "inline":
+                issues.extend(p_issues)
+            elif m_unres:
+                issues.extend(iss for iss in p_issues if iss.startswith("non-pixel conditional"))
+            for _, _, _, _, (lo, hi) in p_rules:
+                if 0.0 < lo < float("inf"):
+                    breakpoints.add(lo)
+                if hi < float("inf"):
+                    breakpoints.add(hi)
+    return rules, issues, breakpoints
+
 
 def normalize_html_text(
     text: str,
     depth: int = 0,
-    external_rules: list | tuple = (),
+    page_rel: str = "site/index.html",
+    css_by_rel: dict[str, str] | None = None,
     i18n_maps: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
 ) -> str:
     """Canonicalize rendered HTML/SVG text, CSS visual order, attributes, comments, and scripts."""
@@ -1709,36 +1916,56 @@ def normalize_html_text(
     parser.close()
     if parser._raw_tag is not None:
         parser._flush_raw_tag(parser._raw_tag)
-    all_rules: list = list(external_rules)
-    idx_base = len(all_rules)
-    for sb in parser.style_blocks:
-        s_rules, _, idx_base = parse_css_stylesheet(sb, start_idx=idx_base)
-        all_rules.extend(s_rules)
+    all_rules, _, breakpoints = _collect_page_stylesheet_rules(
+        page_rel, parser.stylesheet_entries, css_by_rel=css_by_rel
+    )
+    candidates = [320.0, 1440.0]
+    for bp in sorted(breakpoints)[:32]:
+        candidates.extend((max(0.0, bp - 0.5), bp, bp + 0.5))
+    seen_sigs: set[tuple[int, ...]] = set()
+    active_viewports: list[float] = []
+    for vw in candidates:
+        sig = tuple(r_idx for _, _, r_idx, _, (lo, hi) in all_rules if lo <= vw <= hi)
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            active_viewports.append(vw)
 
-    vis_dom_f, vis_dom_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=False, respect_order=False, skip_hidden=True)
-    vis_base_f, vis_base_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=False, respect_order=True, skip_hidden=True)
-    vis_all_f, vis_all_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=True, respect_order=True, skip_hidden=True)
-
-    extra_i18n: list[str] = []
-    if "data-i18n" in text and i18n_maps:
-        for imap in i18n_maps:
-            if not imap:
-                continue
-            ib_f, ib_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=False, respect_order=True, skip_hidden=True, i18n_map=imap)
-            ia_f, ia_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=True, respect_order=True, skip_hidden=True, i18n_map=imap)
-            extra_i18n.extend([ib_f, ib_c, ia_f, ia_c])
+    vis_dom_f, vis_dom_c = serialize_visual_tree(
+        parser.dom_root, all_rules, viewport_w=None, respect_order=False, skip_hidden=True
+    )
+    rendered_views: list[str] = [vis_dom_f, vis_dom_c]
+    seen_rendered: set[str] = {vis_dom_f, vis_dom_c}
+    has_i18n = "data-i18n" in text and bool(i18n_maps)
+    for vw in active_viewports:
+        vf, vc = serialize_visual_tree(
+            parser.dom_root, all_rules, viewport_w=vw, respect_order=True, skip_hidden=True
+        )
+        for v in (vf, vc):
+            if v not in seen_rendered:
+                seen_rendered.add(v)
+                rendered_views.append(v)
+        if has_i18n:
+            for imap in i18n_maps:
+                if not imap:
+                    continue
+                ivf, ivc = serialize_visual_tree(
+                    parser.dom_root,
+                    all_rules,
+                    viewport_w=vw,
+                    respect_order=True,
+                    skip_hidden=True,
+                    i18n_map=imap,
+                )
+                for v in (ivf, ivc):
+                    if v not in seen_rendered:
+                        seen_rendered.add(v)
+                        rendered_views.append(v)
 
     combined = "\n".join([
         "".join(parser.inline_parts),
         "".join(parser.fused_parts),
         "".join(parser.compact_parts),
-        vis_dom_f,
-        vis_dom_c,
-        vis_base_f,
-        vis_base_c,
-        vis_all_f,
-        vis_all_c,
-        *extra_i18n,
+        *rendered_views,
         "\n".join(parser.attr_lines),
         "\n".join(parser.comment_lines),
         *parser.subtrees,
@@ -1752,8 +1979,10 @@ def check_site_visual_integrity(
     text: str,
     report: Report,
     seen: set[tuple[str, str]],
+    css_by_rel: dict[str, str] | None = None,
+    script_hashes_by_rel: dict[str, str] | None = None,
 ) -> None:
-    """Reject bidirectional controls and CSS/HTML layout constructs that obscure visual text order."""
+    """Reject bidirectional controls and CSS/HTML/script constructs that obscure visual order or bypass static scans."""
     def _emit(msg: str) -> None:
         item = ("publish", f"{rel}: {msg} (section 13)")
         if item not in seen:
@@ -1778,18 +2007,34 @@ def check_site_visual_integrity(
         parser.close()
         if parser._raw_tag is not None:
             parser._flush_raw_tag(parser._raw_tag)
+        for iss in parser.html_issues:
+            _emit(iss)
         for iss in parser.inline_css_issues:
             _emit(iss)
-        for sb in parser.style_blocks:
-            _, issues, _ = parse_css_stylesheet(sb)
-            for iss in issues:
-                _emit(iss)
+        _, css_issues, breakpoints = _collect_page_stylesheet_rules(
+            rel, parser.stylesheet_entries, css_by_rel=css_by_rel
+        )
+        for iss in css_issues:
+            _emit(iss)
+        if len(breakpoints) > 32:
+            _emit(f"too many CSS @media breakpoints ({len(breakpoints)} > 32) in site/ page")
+        for src, raw_body in parser.script_tags:
+            if src is not None:
+                resolved_src = resolve_site_asset_href(rel, src)
+                expected_sha = APPROVED_SITE_SCRIPT_FILES.get(resolved_src) if resolved_src else None
+                actual_sha = (script_hashes_by_rel or {}).get(resolved_src) if resolved_src else None
+                if resolved_src is None or expected_sha is None or actual_sha != expected_sha:
+                    _emit(f"unapproved executable script src in site/ ({src[:36]})")
+            if raw_body.strip():
+                body_sha = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
+                if body_sha not in APPROVED_SITE_INLINE_SCRIPTS:
+                    _emit("unapproved executable inline script in site/")
 
 
-def collect_site_context(root: Path) -> tuple[list, list[dict[str, str]]]:
-    """Collect site/ CSS rules and JS i18n string dictionaries for cross-file rendering."""
-    css_rules: list = []
-    idx = 0
+def collect_site_context(root: Path) -> tuple[dict[str, str], dict[str, str], list[dict[str, str]]]:
+    """Collect site/ CSS sources by relpath, script SHA-256 digests, and approved i18n dictionaries."""
+    css_by_rel: dict[str, str] = {}
+    script_hashes_by_rel: dict[str, str] = {}
     first_map: dict[str, str] = {}
     last_map: dict[str, str] = {}
     kv_re = re.compile(
@@ -1801,28 +2046,33 @@ def collect_site_context(root: Path) -> tuple[list, list[dict[str, str]]]:
         if not rel.startswith("site/"):
             continue
         suffix = path.suffix.lower()
-        if suffix not in (".css", ".js", ".mjs", ".cjs"):
+        if suffix not in (".css", *SITE_SCRIPT_SUFFIXES):
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        raw = path.read_bytes()
+        status, text = _decode_site_text(raw)
         if suffix == ".css":
-            rules, _, idx = parse_css_stylesheet(text, start_idx=idx)
-            css_rules.extend(rules)
+            if status == "text" and text is not None:
+                css_by_rel[rel] = text
         else:
-            dec = fold_js_expressions(text)
-            for m in kv_re.finditer(dec):
-                k = m.group(1) or m.group(2) or m.group(3)
-                v = m.group(4) if m.group(4) is not None else (m.group(5) or "")
-                if k not in first_map:
-                    first_map[k] = v
-                last_map[k] = v
+            sha = hashlib.sha256(raw).hexdigest()
+            script_hashes_by_rel[rel] = sha
+            if status == "text" and text is not None and sha == APPROVED_SITE_SCRIPT_FILES.get(rel):
+                dec = fold_js_expressions(text)
+                for m in kv_re.finditer(dec):
+                    k = m.group(1) or m.group(2) or m.group(3)
+                    v = m.group(4) if m.group(4) is not None else (m.group(5) or "")
+                    if k not in first_map:
+                        first_map[k] = v
+                    last_map[k] = v
     i18n_maps = [m for m in (first_map, last_map) if m]
-    return css_rules, i18n_maps
+    return css_by_rel, script_hashes_by_rel, i18n_maps
 
 
 def normalized_site_views(
     path: Path,
     text: str,
-    external_rules: list | tuple = (),
+    page_rel: str = "site/index.html",
+    css_by_rel: dict[str, str] | None = None,
     i18n_maps: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
 ) -> list[str]:
     """Build raw and decoded/rendered views of a deployed site/ text asset."""
@@ -1841,9 +2091,9 @@ def normalized_site_views(
     if suffix in (".css", ".html", ".htm", ".xhtml", ".svg"):
         _add(INVISIBLE_FORMAT_RE.sub("", unescape_css_literals(text)))
     if suffix in (".html", ".htm", ".xhtml", ".svg", ".xml") or "<" in js_dec or "&" in js_dec:
-        _add(normalize_html_text(text, external_rules=external_rules, i18n_maps=i18n_maps))
+        _add(normalize_html_text(text, page_rel=page_rel, css_by_rel=css_by_rel, i18n_maps=i18n_maps))
         if js_dec != text:
-            _add(normalize_html_text(js_dec, external_rules=external_rules, i18n_maps=i18n_maps))
+            _add(normalize_html_text(js_dec, page_rel=page_rel, css_by_rel=css_by_rel, i18n_maps=i18n_maps))
     return views
 
 
@@ -1879,13 +2129,13 @@ SITE_LEAK_PATTERNS = [
         internal_host_is_real,
     ),
     (
-        re.compile(r"\barn:aws(?:-[a-z-]+)?:[a-z0-9-]+:[a-z0-9-]*:(\d{12}):[^\s`)\]\"'<>]+"),
+        re.compile(r"\barn:aws(?:-[a-z-]+)?:[a-z0-9-]+:[a-z0-9-]*:(\d{12}):[^\s`)\]\"'<>]+", re.IGNORECASE),
         "publish",
         "account identifier (section 13)",
         arn_is_real,
     ),
     (
-        re.compile(r"\b([a-z0-9][a-z0-9-]*)@([a-z0-9][a-z0-9-]*)\.iam\.gserviceaccount\.com\b"),
+        re.compile(r"\b([a-z0-9][a-z0-9-]*)@([a-z0-9][a-z0-9-]*)\.iam\.gserviceaccount\.com\b", re.IGNORECASE),
         "publish",
         "account identifier (section 13)",
         service_account_is_real,
@@ -1938,7 +2188,7 @@ def _scan_leak_patterns(
 
 def check_leaks(root: Path, report: Report) -> None:
     site_path_patterns = [*LEAK_PATTERNS[:4], *SITE_LEAK_PATTERNS]
-    site_css_rules, site_i18n_maps = collect_site_context(root)
+    site_css_by_rel, site_script_hashes, site_i18n_maps = collect_site_context(root)
     for path in iter_files(root):
         rel = path.relative_to(root).as_posix()
         markdown = is_markdown(path)
@@ -1967,13 +2217,32 @@ def check_leaks(root: Path, report: Report) -> None:
                 )
                 if not site_text:
                     continue
+            elif status == "unapproved_script":
+                report.add(
+                    "publish",
+                    f"{rel}: unapproved or uninspected executable script in published site/ tree (section 13)",
+                )
+                if not site_text:
+                    continue
             elif status != "text" or site_text is None:
                 continue
-            check_site_visual_integrity(rel, path, site_text, report, seen_for_file)
+            check_site_visual_integrity(
+                rel,
+                path,
+                site_text,
+                report,
+                seen_for_file,
+                css_by_rel=site_css_by_rel,
+                script_hashes_by_rel=site_script_hashes,
+            )
             patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:4])
             patterns.extend(SITE_LEAK_PATTERNS)
             for view in normalized_site_views(
-                path, site_text, external_rules=site_css_rules, i18n_maps=site_i18n_maps
+                path,
+                site_text,
+                page_rel=rel,
+                css_by_rel=site_css_by_rel,
+                i18n_maps=site_i18n_maps,
             ):
                 prose = blank_fenced_blocks(view) if markdown else view
                 masked = blank_code_spans(prose) if markdown else view
