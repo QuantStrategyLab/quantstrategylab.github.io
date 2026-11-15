@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import ipaddress
 import re
 import subprocess
 import sys
@@ -708,6 +709,67 @@ def read_deployed_site_text(root: Path, path: Path) -> str | None:
         return raw.decode("utf-8", errors="ignore")
 
 
+INTERNAL_IPV4_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+)
+
+INTERNAL_IPV6_NETWORKS = (
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("::1/128"),
+)
+
+
+def is_internal_ipv4(addr: ipaddress.IPv4Address) -> bool:
+    return any(addr in net for net in INTERNAL_IPV4_NETWORKS)
+
+
+def ipv4_is_private(text: str, match: re.Match, ctx: FileContext) -> bool:
+    try:
+        addr = ipaddress.ip_address(match.group(0))
+    except ValueError:
+        return False
+    return isinstance(addr, ipaddress.IPv4Address) and is_internal_ipv4(addr)
+
+
+def ipv6_is_private(text: str, match: re.Match, ctx: FileContext) -> bool:
+    candidate = match.group(0).split("%", 1)[0]
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    if not isinstance(addr, ipaddress.IPv6Address):
+        return False
+    if addr.ipv4_mapped is not None and is_internal_ipv4(addr.ipv4_mapped):
+        return True
+    return any(addr in net for net in INTERNAL_IPV6_NETWORKS)
+
+
+SITE_LEAK_PATTERNS = [
+    (
+        re.compile(r"(?<![0-9.])\d{1,3}(?:\.\d{1,3}){3}(?![0-9.])"),
+        "publish",
+        "private IPv4 address (section 13)",
+        ipv4_is_private,
+    ),
+    (
+        re.compile(
+            r"(?<![0-9A-Za-z:_])"
+            r"(?:[0-9A-Fa-f]{0,4}:){2,7}(?:[0-9A-Fa-f]{1,4}|\d{1,3}(?:\.\d{1,3}){3})?"
+            r"(?![0-9A-Za-z:_])"
+        ),
+        "publish",
+        "private IPv6 address (section 13)",
+        ipv6_is_private,
+    ),
+]
+
+
 def check_leaks(root: Path, report: Report) -> None:
     for path in iter_files(root):
         markdown = is_markdown(path)
@@ -726,7 +788,9 @@ def check_leaks(root: Path, report: Report) -> None:
             prose=prose,
             masked=masked,
         )
-        patterns = LEAK_PATTERNS if markdown else LEAK_PATTERNS[:3]
+        patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:3])
+        if rel.startswith("site/"):
+            patterns.extend(SITE_LEAK_PATTERNS)
         for pattern, category, label, predicate in patterns:
             for match in pattern.finditer(text):
                 # A pattern without a predicate describes prose, and a fenced

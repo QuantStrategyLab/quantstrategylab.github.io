@@ -176,6 +176,7 @@ class LeakTest(CheckerTestCase):
 
     def test_deployed_site_text_assets_are_scanned_for_identifier_leaks(self):
         self.write("site/index.html", '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n')
+        self.write("site/assets/styles.css", "a::before { content: ''; }\n/* example 192.0.2.1 2001:db8::1 */\n")
         (self.root / "site/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
         clean_report = self.report()
         check_style.check_leaks(self.root, clean_report)
@@ -195,6 +196,10 @@ class LeakTest(CheckerTestCase):
             '{"path":"/home/operator/prod/config","url":"https://actual-private-app.workers.dev"}\n',
         )
         self.write("site/build/audit.md", "# Build audit\n")
+        self.write(
+            "site/private-ip.html",
+            "<!-- internal: http://10.23.45.67:8080, v6: http://[fd12:3456:789a::1]/api, meta: 169.254.169.254, ll: fe80::1 -->\n",
+        )
         dirty_report = self.report()
         check_style.check_leaks(self.root, dirty_report)
         check_style.check_internal_paths(self.root, dirty_report)
@@ -205,6 +210,10 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/dist/runtime-config.json" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/dist/runtime-config.json" in m and "personal subdomain" in m for m in msgs))
         self.assertTrue(any("site/build/audit.md" in m and "tracked internal note" in m for m in msgs))
+        self.assertTrue(any("site/private-ip.html" in m and "private IPv4 address" in m and "10.23.45.67" in m for m in msgs))
+        self.assertTrue(any("site/private-ip.html" in m and "private IPv4 address" in m and "169.254.169.254" in m for m in msgs))
+        self.assertTrue(any("site/private-ip.html" in m and "private IPv6 address" in m and "fd12:3456:789a::1" in m for m in msgs))
+        self.assertTrue(any("site/private-ip.html" in m and "private IPv6 address" in m and "fe80::1" in m for m in msgs))
 
     def test_sha_in_url_is_not_reported(self):
         text = (
