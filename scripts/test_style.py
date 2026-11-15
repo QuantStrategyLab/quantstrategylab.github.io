@@ -191,20 +191,11 @@ class LeakTest(CheckerTestCase):
             entry = struct.pack("<BBBBHHII", 1, 1, 0, 0, 1, 32, len(png_bytes), 22)
             return header + entry + png_bytes
 
-        def make_pdf(content: bytes, *, compressed: bool = False, extra_dict: bytes = b"") -> bytes:
-            if compressed:
-                stream = zlib.compress(content)
-                body = f"<< /Length {len(stream)} /Filter /FlateDecode >>\nstream\n".encode() + stream + b"\nendstream"
-            else:
-                body = f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream"
-            return b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog " + extra_dict + b" >>\nendobj\n2 0 obj\n" + body + b"\nendobj\n%%EOF\n"
-
         clean_png = make_png()
         self.write("site/index.html", '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n')
         self.write("site/assets/styles.css", "a::before { content: ''; }\n/* example 192.0.2.1 2001:db8::1 */\n")
         (self.root / "site/logo.png").write_bytes(clean_png)
         (self.root / "site/favicon.ico").write_bytes(make_ico(clean_png))
-        (self.root / "site/clean.pdf").write_bytes(make_pdf(b"BT (QuantStrategyLab Docs) Tj ET", compressed=True))
         clean_report = self.report()
         check_style.check_leaks(self.root, clean_report)
         self.assertEqual(clean_report.findings, [])
@@ -223,21 +214,10 @@ class LeakTest(CheckerTestCase):
             '{"path":"/home/operator/prod/config","url":"https://actual-private-app.workers.dev"}\n',
         )
         self.write("site/build/audit.md", "# Build audit\n")
+        self.write("site/docs/acceptance-policy.md", "# Copied acceptance policy\n")
         self.write(
             "site/private-ip.html",
             "<!-- internal: http://10.23.45.67:8080, v6: http://[fd12:3456:789a::1]/api, meta: 169.254.169.254, ll: fe80::1 -->\n",
-        )
-        (self.root / "site/leak-compressed.pdf").write_bytes(
-            make_pdf(
-                b"BT [(/home/op) -10 (erator/prod/config)] TJ (https://actual-private-app.workers.dev) Tj (10.23.45.67) Tj ET",
-                compressed=True,
-            )
-        )
-        (self.root / "site/release.pdf").write_bytes(
-            make_pdf(
-                b"BT [<2f686f6d652f6f70> -5 <657261746f722f70726f642f636f6e666967>] TJ ET",
-                compressed=True,
-            )
         )
         (self.root / "site/leak-meta.png").write_bytes(
             make_png(
@@ -245,9 +225,7 @@ class LeakTest(CheckerTestCase):
                 png_chunk(b"zTXt", b"Host\x00\x00" + zlib.compress(b"https://actual-private-app.workers.dev")),
             )
         )
-        (self.root / "site/encrypted.pdf").write_bytes(
-            make_pdf(b"BT (opaque) Tj ET", compressed=True, extra_dict=b"/Encrypt 3 0 R")
-        )
+        (self.root / "site/release.pdf").write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n")
         (self.root / "site/bundle.zip").write_bytes(b"PK\x03\x04\x00\x00payload")
         (self.root / "site/corrupt.png").write_bytes(b"not a real png\x00")
         dirty_report = self.report()
@@ -260,18 +238,15 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/dist/runtime-config.json" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/dist/runtime-config.json" in m and "personal subdomain" in m for m in msgs))
         self.assertTrue(any("site/build/audit.md" in m and "tracked internal note" in m for m in msgs))
+        self.assertTrue(any("site/docs/acceptance-policy.md" in m and "tracked internal note" in m for m in msgs))
         self.assertTrue(any("site/private-ip.html" in m and "private IPv4 address" in m and "10.23.45.67" in m for m in msgs))
         self.assertTrue(any("site/private-ip.html" in m and "private IPv4 address" in m and "169.254.169.254" in m for m in msgs))
         self.assertTrue(any("site/private-ip.html" in m and "private IPv6 address" in m and "fd12:3456:789a::1" in m for m in msgs))
         self.assertTrue(any("site/private-ip.html" in m and "private IPv6 address" in m and "fe80::1" in m for m in msgs))
-        self.assertTrue(any("site/leak-compressed.pdf" in m and "absolute home path" in m for m in msgs))
-        self.assertTrue(any("site/leak-compressed.pdf" in m and "personal subdomain" in m for m in msgs))
-        self.assertTrue(any("site/leak-compressed.pdf" in m and "private IPv4 address" in m for m in msgs))
-        self.assertTrue(any("site/release.pdf" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "private IPv4 address" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "personal subdomain" in m for m in msgs))
-        self.assertTrue(any("site/encrypted.pdf" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertTrue(any("site/release.pdf" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/bundle.zip" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/corrupt.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
 

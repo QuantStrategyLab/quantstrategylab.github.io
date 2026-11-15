@@ -30,7 +30,6 @@ Exit code 0 when nothing in the blocking set is found.
 from __future__ import annotations
 
 import argparse
-import base64
 import fnmatch
 import ipaddress
 import re
@@ -687,145 +686,18 @@ def blank_fenced_blocks(text: str) -> str:
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 PNG_IMAGE_CHUNKS = {
     b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
-    b"sBIT", b"bKGD", b"hIST", b"pHYs", b"sPLT", b"tIME", b"acTL", b"fcTL", b"fdAT",
+    b"sBIT", b"bKGD", b"hIST", b"pHYs", b"tIME",
 }
-
-PDF_IMAGE_FILTERS = (b"/DCTDecode", b"/JPXDecode", b"/JBIG2Decode", b"/CCITTFaxDecode")
-PDF_LITERAL = re.compile(r"\(([^()\\]*(?:\\.[^()\\]*)*)\)")
-PDF_HEX = re.compile(r"<([0-9A-Fa-f\s]{4,})>")
-PDF_TJ_ITEM = re.compile(r"\(([^()\\]*(?:\\.[^()\\]*)*)\)|<([0-9A-Fa-f\s]{2,})>")
-PDF_TJ_ARRAY = re.compile(r"\[((?:[^\[\]]|\((?:[^()\\]|\\.)*\))*)\]\s*TJ")
-PDF_STREAM = re.compile(rb"stream(?:\r\n|\r|\n)(.*?)(?:\r\n|\r|\n)?endstream", re.DOTALL)
-
-
-def _decode_pdf_bytes(buf: bytes) -> str:
-    if buf.startswith(b"\xfe\xff"):
-        return buf[2:].decode("utf-16-be", errors="ignore")
-    if buf.startswith(b"\xff\xfe"):
-        return buf[2:].decode("utf-16-le", errors="ignore")
-    return buf.decode("utf-8", errors="ignore")
-
-
-def _unescape_pdf_literal(raw_s: str) -> str:
-    buf = bytearray()
-    i = 0
-    while i < len(raw_s):
-        ch = raw_s[i]
-        if ch == "\\" and i + 1 < len(raw_s):
-            nxt = raw_s[i + 1]
-            if nxt in "01234567":
-                oct_m = re.match(r"[0-7]{1,3}", raw_s[i + 1:i + 4])
-                buf.append(int(oct_m.group(0), 8) & 0xFF)
-                i += 1 + len(oct_m.group(0))
-                continue
-            if nxt in "\r\n":
-                i += 3 if raw_s[i + 1:i + 3] == "\r\n" else 2
-                continue
-            esc = {"n": 10, "r": 13, "t": 9, "b": 8, "f": 12}.get(nxt)
-            buf.append(esc if esc is not None else ord(nxt) & 0xFF)
-            i += 2
-        else:
-            buf.append(ord(ch) & 0xFF)
-            i += 1
-    return _decode_pdf_bytes(bytes(buf))
-
-
-def _decode_pdf_hex(raw_hex: str) -> str:
-    hx = re.sub(r"\s+", "", raw_hex)
-    if len(hx) % 2 == 1:
-        hx += "0"
-    raw_b = bytes.fromhex(hx)
-    if raw_b.startswith((b"\xfe\xff", b"\xff\xfe")):
-        return _decode_pdf_bytes(raw_b)
-    if all(32 <= b < 127 or b in (9, 10, 13) for b in raw_b):
-        return raw_b.decode("ascii", errors="ignore")
-    return ""
-
-
-def _extract_pdf_strings(text: str) -> list[str]:
-    extracted: list[str] = []
-    for arr_m in PDF_TJ_ARRAY.finditer(text):
-        parts_arr: list[str] = []
-        for item_m in PDF_TJ_ITEM.finditer(arr_m.group(1)):
-            if item_m.group(1) is not None:
-                parts_arr.append(_unescape_pdf_literal(item_m.group(1)))
-            else:
-                parts_arr.append(_decode_pdf_hex(item_m.group(2)))
-        joined = "".join(parts_arr)
-        if joined:
-            extracted.append(joined)
-    for m in PDF_LITERAL.finditer(text):
-        val = _unescape_pdf_literal(m.group(1))
-        if val:
-            extracted.append(val)
-    for m in PDF_HEX.finditer(text):
-        val = _decode_pdf_hex(m.group(1))
-        if val:
-            extracted.append(val)
-    return extracted
-
-
-def _decode_pdf_ascii85(data: bytes) -> bytes:
-    stripped = data.strip()
-    return base64.a85decode(stripped, adobe=stripped.endswith(b"~>"))
-
-
-def _decode_pdf_asciihex(data: bytes) -> bytes:
-    cleaned = re.sub(rb"[\s>]+", b"", data.rstrip(b"> \r\n\t"))
-    if len(cleaned) % 2 == 1:
-        cleaned += b"0"
-    return bytes.fromhex(cleaned.decode("ascii"))
-
-
-def _pdf_stream_filters(header: bytes) -> list[bytes]:
-    m = re.search(rb"/Filter\s*(?:\[([^\]]+)\]|/([A-Za-z0-9]+))", header)
-    if not m:
-        return []
-    if m.group(2):
-        return [m.group(2)]
-    return re.findall(rb"/([A-Za-z0-9]+)", m.group(1))
-
-
-def extract_pdf_text(raw: bytes) -> str | None:
-    """Return extracted PDF metadata/content text, or None if encrypted/unreadable."""
-    if not raw.lstrip().startswith(b"%PDF-") or re.search(rb"/Encrypt\b", raw):
-        return None
-    parts: list[str] = [raw.decode("latin-1")]
-    for m in PDF_STREAM.finditer(raw):
-        obj_start = max(0, raw.rfind(b"endobj", 0, m.start()))
-        header = raw[obj_start:m.start()]
-        if b"/Subtype/Image" in header or b"/Subtype /Image" in header:
-            continue
-        filters = _pdf_stream_filters(header)
-        if any(b"/" + f in PDF_IMAGE_FILTERS for f in filters):
-            continue
-        data = m.group(1)
-        for flt in filters:
-            try:
-                if flt == b"ASCII85Decode":
-                    data = _decode_pdf_ascii85(data)
-                elif flt == b"ASCIIHexDecode":
-                    data = _decode_pdf_asciihex(data)
-                elif flt == b"FlateDecode":
-                    data = zlib.decompress(data)
-                else:
-                    return None
-            except (ValueError, zlib.error):
-                return None
-        stream_text = data.decode("latin-1")
-        parts.append(stream_text)
-        parts.extend(_extract_pdf_strings(stream_text))
-    parts.extend(_extract_pdf_strings(parts[0]))
-    return "\n".join(parts)
 
 
 def extract_png_text(raw: bytes) -> str | None:
-    """Extract PNG metadata/text chunks, failing closed on malformed chunks or trailing data."""
+    """Validate PNG container/CRC/IDAT and extract tEXt/zTXt/iTXt chunks, or fail closed."""
     if not raw.startswith(PNG_MAGIC):
         return None
     pos = len(PNG_MAGIC)
     seen_ihdr = False
     seen_iend = False
+    idat_parts: list[bytes] = []
     parts: list[str] = []
     while pos + 8 <= len(raw):
         clen, ctype = struct.unpack(">I4s", raw[pos:pos + 8])
@@ -834,17 +706,28 @@ def extract_png_text(raw: bytes) -> str | None:
         if data_end + 4 > len(raw):
             return None
         cdata = raw[data_start:data_end]
+        expected_crc = struct.unpack(">I", raw[data_end:data_end + 4])[0]
+        if (zlib.crc32(ctype + cdata) & 0xFFFFFFFF) != expected_crc:
+            return None
         pos = data_end + 4
-        if ctype == b"IHDR":
+        if not seen_ihdr:
+            if ctype != b"IHDR":
+                return None
             seen_ihdr = True
-        elif ctype == b"IEND":
+            continue
+        if ctype == b"IEND":
             seen_iend = True
             break
-        elif ctype in PNG_IMAGE_CHUNKS:
+        if ctype == b"IDAT":
+            idat_parts.append(cdata)
             continue
-        elif ctype == b"tEXt":
+        if ctype in PNG_IMAGE_CHUNKS:
+            continue
+        if ctype == b"tEXt":
+            if b"\x00" not in cdata:
+                return None
             parts.append(cdata.replace(b"\x00", b"\n").decode("latin-1"))
-        elif ctype in (b"zTXt", b"iCCP"):
+        elif ctype == b"zTXt":
             sep = cdata.find(b"\x00")
             if sep == -1 or sep + 2 > len(cdata) or cdata[sep + 1] != 0:
                 return None
@@ -861,7 +744,6 @@ def extract_png_text(raw: bytes) -> str | None:
             rest_parts = cdata[sep1 + 3:].split(b"\x00", 2)
             if len(rest_parts) < 3:
                 return None
-            parts.append(cdata[:sep1].decode("utf-8", errors="ignore"))
             text_bytes = rest_parts[2]
             if comp_flag == 1:
                 if comp_method != 0:
@@ -870,16 +752,26 @@ def extract_png_text(raw: bytes) -> str | None:
                     text_bytes = zlib.decompress(text_bytes)
                 except zlib.error:
                     return None
-            parts.append(text_bytes.decode("utf-8", errors="ignore"))
+            elif comp_flag != 0:
+                return None
+            try:
+                parts.append(cdata[:sep1].decode("utf-8"))
+                parts.append(text_bytes.decode("utf-8"))
+            except UnicodeDecodeError:
+                return None
         else:
-            parts.append(cdata.decode("utf-8", errors="ignore"))
-    if not seen_ihdr or not seen_iend or pos != len(raw):
+            return None
+    if not seen_ihdr or not seen_iend or pos != len(raw) or not idat_parts:
+        return None
+    try:
+        zlib.decompress(b"".join(idat_parts))
+    except zlib.error:
         return None
     return "\n".join(parts)
 
 
 def extract_ico_text(raw: bytes) -> str | None:
-    """Validate ICO directory structure and scan embedded PNG images."""
+    """Validate ICO directory structure and require every image entry to be valid PNG."""
     if len(raw) < 6:
         return None
     reserved, itype, count = struct.unpack("<HHH", raw[:6])
@@ -892,7 +784,7 @@ def extract_ico_text(raw: bytes) -> str | None:
     for i in range(count):
         base = 6 + 16 * i
         size, offset = struct.unpack("<II", raw[base + 8:base + 16])
-        if size < 4 or offset < dir_end or offset + size > len(raw):
+        if size < 8 or offset < dir_end or offset + size > len(raw):
             return None
         spans.append((offset, offset + size))
     spans.sort()
@@ -903,16 +795,13 @@ def extract_ico_text(raw: bytes) -> str | None:
             return None
         cursor = end
         entry = raw[start:end]
-        if entry.startswith(PNG_MAGIC):
-            png_txt = extract_png_text(entry)
-            if png_txt is None:
-                return None
-            if png_txt:
-                parts.append(png_txt)
-        else:
-            dib_size = struct.unpack("<I", entry[:4])[0]
-            if dib_size not in (12, 40, 52, 56, 108, 124) or len(entry) < dib_size:
-                return None
+        if not entry.startswith(PNG_MAGIC):
+            return None
+        png_txt = extract_png_text(entry)
+        if png_txt is None:
+            return None
+        if png_txt:
+            parts.append(png_txt)
     if cursor != len(raw):
         return None
     return "\n".join(parts)
@@ -925,15 +814,14 @@ def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
         return "skip", None
     suffix = path.suffix.lower()
     raw = path.read_bytes()
-    if suffix == ".pdf":
-        text = extract_pdf_text(raw)
-        return ("text", text) if text is not None else ("unscanned_binary", None)
     if suffix == ".png":
         text = extract_png_text(raw)
         return ("text", text) if text is not None else ("unscanned_binary", None)
     if suffix == ".ico":
         text = extract_ico_text(raw)
         return ("text", text) if text is not None else ("unscanned_binary", None)
+    if suffix == ".pdf":
+        return "unscanned_binary", None
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
             return "text", raw.decode("utf-16")
@@ -944,9 +832,7 @@ def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
     try:
         return "text", raw.decode("utf-8")
     except UnicodeDecodeError:
-        if any(b < 32 and b not in (9, 10, 13) for b in raw):
-            return "unscanned_binary", None
-        return "text", raw.decode("utf-8", errors="ignore")
+        return "unscanned_binary", None
 
 
 INTERNAL_IPV4_NETWORKS = (
@@ -1014,9 +900,7 @@ def check_leaks(root: Path, report: Report) -> None:
     for path in iter_files(root):
         rel = path.relative_to(root).as_posix()
         markdown = is_markdown(path)
-        if markdown:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        else:
+        if rel.startswith("site/"):
             status, site_text = read_deployed_site_asset(root, path)
             if status == "unscanned_binary":
                 report.add(
@@ -1027,6 +911,10 @@ def check_leaks(root: Path, report: Report) -> None:
             if status != "text" or site_text is None:
                 continue
             text = site_text
+        elif markdown:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        else:
+            continue
         prose = blank_fenced_blocks(text) if markdown else text
         masked = blank_code_spans(prose) if markdown else text
         ctx = FileContext(
@@ -1053,7 +941,7 @@ def matching_internal_note_pattern(rel: str) -> str | None:
     """Return the matching internal-note .gitignore pattern for a Git-visible path, if any."""
     name = Path(rel).name
     for pattern in INTERNAL_NOTE_GITIGNORE:
-        if pattern == "docs/acceptance-policy.md":
+        if pattern == "docs/acceptance-policy.md" and rel == "docs/acceptance-policy.md":
             continue
         if pattern.endswith("/"):
             if rel.startswith(pattern) or f"/{pattern}" in rel:
