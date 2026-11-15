@@ -763,6 +763,18 @@ def unfilter_png_scanlines(
     return bytes(out)
 
 
+def _zlib_decompress_exact(data: bytes) -> bytes | None:
+    """Decompress a zlib stream and fail closed on truncation or trailing bytes."""
+    zobj = zlib.decompressobj()
+    try:
+        out = zobj.decompress(data) + zobj.flush()
+    except zlib.error:
+        return None
+    if not zobj.eof or zobj.unused_data or zobj.unconsumed_tail:
+        return None
+    return out
+
+
 def inspect_png_asset(
     raw: bytes,
 ) -> tuple[str, tuple[int, int, int, int, int, str], bool] | None:
@@ -814,10 +826,10 @@ def inspect_png_asset(
             if sep == -1 or sep + 2 > len(cdata) or cdata[sep + 1] != 0:
                 return None
             parts.append(cdata[:sep].decode("latin-1"))
-            try:
-                parts.append(zlib.decompress(cdata[sep + 2:]).decode("latin-1"))
-            except zlib.error:
+            zraw = _zlib_decompress_exact(cdata[sep + 2:])
+            if zraw is None:
                 return None
+            parts.append(zraw.decode("latin-1"))
         elif ctype == b"iTXt":
             sep1 = cdata.find(b"\x00")
             if sep1 == -1 or sep1 + 3 > len(cdata):
@@ -830,9 +842,8 @@ def inspect_png_asset(
             if comp_flag == 1:
                 if comp_method != 0:
                     return None
-                try:
-                    text_bytes = zlib.decompress(text_bytes)
-                except zlib.error:
+                text_bytes = _zlib_decompress_exact(text_bytes)
+                if text_bytes is None:
                     return None
             elif comp_flag != 0:
                 return None
@@ -845,9 +856,8 @@ def inspect_png_asset(
             return None
     if ihdr is None or not seen_iend or pos != len(raw) or not idat_parts:
         return None
-    try:
-        decomp = zlib.decompress(b"".join(idat_parts))
-    except zlib.error:
+    decomp = _zlib_decompress_exact(b"".join(idat_parts))
+    if decomp is None:
         return None
     width, height, bit_depth, color_type, interlace = ihdr
     pixels = unfilter_png_scanlines(decomp, width, height, bit_depth, color_type)

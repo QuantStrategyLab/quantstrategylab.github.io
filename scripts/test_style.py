@@ -259,6 +259,18 @@ class LeakTest(CheckerTestCase):
         (self.root / "site/unapproved-pixel.png").write_bytes(clean_png)
         (self.root / "site/unapproved.ico").write_bytes(make_ico(clean_png))
         (self.root / "site/landing-light-192.png").write_bytes(clean_png)
+        # Re-compress/append trailing payload inside IDAT of an otherwise approved PNG.
+        approved_bytes = (repo_root / "site/landing-light-512.png").read_bytes()
+        pos = 8
+        tampered = bytearray(b"\x89PNG\r\n\x1a\n")
+        while pos < len(approved_bytes):
+            clen, ctype = struct.unpack(">I4s", approved_bytes[pos:pos + 8])
+            cdata = approved_bytes[pos + 8:pos + 8 + clen]
+            if ctype == b"IDAT":
+                cdata = cdata + b"/home/operator/prod/config db-primary.ops.internal"
+            tampered.extend(png_chunk(ctype, cdata))
+            pos += 12 + clen
+        (self.root / "site/landing-light-512.png").write_bytes(bytes(tampered))
         (self.root / "site/leak-meta.png").write_bytes(
             make_png(
                 png_chunk(b"tEXt", b"Comment\x00deploy /home/operator/prod/config http://10.23.45.67"),
@@ -290,6 +302,7 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/unapproved-pixel.png" in m and "unapproved or uninspected raster asset" in m for m in msgs))
         self.assertTrue(any("site/unapproved.ico" in m and "unapproved or uninspected raster asset" in m for m in msgs))
         self.assertTrue(any("site/landing-light-192.png" in m and "unapproved or uninspected raster asset" in m for m in msgs))
+        self.assertTrue(any("site/landing-light-512.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/release.pdf" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/bundle.zip" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/corrupt.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
