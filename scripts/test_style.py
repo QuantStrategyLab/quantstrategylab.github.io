@@ -175,7 +175,21 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("absolute home path" in m for m in path_found))
 
     def test_deployed_site_text_assets_are_scanned_for_identifier_leaks(self):
+        import struct
         import zlib
+
+        def png_chunk(ctype: bytes, data: bytes) -> bytes:
+            return struct.pack(">I4s", len(data), ctype) + data + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
+
+        def make_png(*extra_chunks: bytes) -> bytes:
+            ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+            idat = zlib.compress(b"\x00\xff\x00\x00")
+            return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr) + b"".join(extra_chunks) + png_chunk(b"IDAT", idat) + png_chunk(b"IEND", b"")
+
+        def make_ico(png_bytes: bytes) -> bytes:
+            header = struct.pack("<HHH", 0, 1, 1)
+            entry = struct.pack("<BBBBHHII", 1, 1, 0, 0, 1, 32, len(png_bytes), 22)
+            return header + entry + png_bytes
 
         def make_pdf(content: bytes, *, compressed: bool = False, extra_dict: bytes = b"") -> bytes:
             if compressed:
@@ -185,9 +199,11 @@ class LeakTest(CheckerTestCase):
                 body = f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream"
             return b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog " + extra_dict + b" >>\nendobj\n2 0 obj\n" + body + b"\nendobj\n%%EOF\n"
 
+        clean_png = make_png()
         self.write("site/index.html", '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n')
         self.write("site/assets/styles.css", "a::before { content: ''; }\n/* example 192.0.2.1 2001:db8::1 */\n")
-        (self.root / "site/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+        (self.root / "site/logo.png").write_bytes(clean_png)
+        (self.root / "site/favicon.ico").write_bytes(make_ico(clean_png))
         (self.root / "site/clean.pdf").write_bytes(make_pdf(b"BT (QuantStrategyLab Docs) Tj ET", compressed=True))
         clean_report = self.report()
         check_style.check_leaks(self.root, clean_report)
@@ -217,10 +233,23 @@ class LeakTest(CheckerTestCase):
                 compressed=True,
             )
         )
+        (self.root / "site/release.pdf").write_bytes(
+            make_pdf(
+                b"BT [<2f686f6d652f6f70> -5 <657261746f722f70726f642f636f6e666967>] TJ ET",
+                compressed=True,
+            )
+        )
+        (self.root / "site/leak-meta.png").write_bytes(
+            make_png(
+                png_chunk(b"tEXt", b"Comment\x00deploy /home/operator/prod/config http://10.23.45.67"),
+                png_chunk(b"zTXt", b"Host\x00\x00" + zlib.compress(b"https://actual-private-app.workers.dev")),
+            )
+        )
         (self.root / "site/encrypted.pdf").write_bytes(
             make_pdf(b"BT (opaque) Tj ET", compressed=True, extra_dict=b"/Encrypt 3 0 R")
         )
         (self.root / "site/bundle.zip").write_bytes(b"PK\x03\x04\x00\x00payload")
+        (self.root / "site/corrupt.png").write_bytes(b"not a real png\x00")
         dirty_report = self.report()
         check_style.check_leaks(self.root, dirty_report)
         check_style.check_internal_paths(self.root, dirty_report)
@@ -238,8 +267,13 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/leak-compressed.pdf" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/leak-compressed.pdf" in m and "personal subdomain" in m for m in msgs))
         self.assertTrue(any("site/leak-compressed.pdf" in m and "private IPv4 address" in m for m in msgs))
+        self.assertTrue(any("site/release.pdf" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/leak-meta.png" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/leak-meta.png" in m and "private IPv4 address" in m for m in msgs))
+        self.assertTrue(any("site/leak-meta.png" in m and "personal subdomain" in m for m in msgs))
         self.assertTrue(any("site/encrypted.pdf" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/bundle.zip" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertTrue(any("site/corrupt.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
 
     def test_sha_in_url_is_not_reported(self):
         text = (

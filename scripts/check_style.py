@@ -34,6 +34,7 @@ import base64
 import fnmatch
 import ipaddress
 import re
+import struct
 import subprocess
 import sys
 import unicodedata
@@ -683,14 +684,16 @@ def blank_fenced_blocks(text: str) -> str:
     return FENCED_BLOCK.sub(blank, text)
 
 
-ALLOWED_BINARY_MEDIA_SUFFIXES = {
-    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".avif", ".bmp", ".tiff",
-    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp3", ".mp4", ".mov", ".webm",
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+PNG_IMAGE_CHUNKS = {
+    b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
+    b"sBIT", b"bKGD", b"hIST", b"pHYs", b"sPLT", b"tIME", b"acTL", b"fcTL", b"fdAT",
 }
 
 PDF_IMAGE_FILTERS = (b"/DCTDecode", b"/JPXDecode", b"/JBIG2Decode", b"/CCITTFaxDecode")
 PDF_LITERAL = re.compile(r"\(([^()\\]*(?:\\.[^()\\]*)*)\)")
 PDF_HEX = re.compile(r"<([0-9A-Fa-f\s]{4,})>")
+PDF_TJ_ITEM = re.compile(r"\(([^()\\]*(?:\\.[^()\\]*)*)\)|<([0-9A-Fa-f\s]{2,})>")
 PDF_TJ_ARRAY = re.compile(r"\[((?:[^\[\]]|\((?:[^()\\]|\\.)*\))*)\]\s*TJ")
 PDF_STREAM = re.compile(rb"stream(?:\r\n|\r|\n)(.*?)(?:\r\n|\r|\n)?endstream", re.DOTALL)
 
@@ -727,10 +730,28 @@ def _unescape_pdf_literal(raw_s: str) -> str:
     return _decode_pdf_bytes(bytes(buf))
 
 
+def _decode_pdf_hex(raw_hex: str) -> str:
+    hx = re.sub(r"\s+", "", raw_hex)
+    if len(hx) % 2 == 1:
+        hx += "0"
+    raw_b = bytes.fromhex(hx)
+    if raw_b.startswith((b"\xfe\xff", b"\xff\xfe")):
+        return _decode_pdf_bytes(raw_b)
+    if all(32 <= b < 127 or b in (9, 10, 13) for b in raw_b):
+        return raw_b.decode("ascii", errors="ignore")
+    return ""
+
+
 def _extract_pdf_strings(text: str) -> list[str]:
     extracted: list[str] = []
     for arr_m in PDF_TJ_ARRAY.finditer(text):
-        joined = "".join(_unescape_pdf_literal(m.group(1)) for m in PDF_LITERAL.finditer(arr_m.group(1)))
+        parts_arr: list[str] = []
+        for item_m in PDF_TJ_ITEM.finditer(arr_m.group(1)):
+            if item_m.group(1) is not None:
+                parts_arr.append(_unescape_pdf_literal(item_m.group(1)))
+            else:
+                parts_arr.append(_decode_pdf_hex(item_m.group(2)))
+        joined = "".join(parts_arr)
         if joined:
             extracted.append(joined)
     for m in PDF_LITERAL.finditer(text):
@@ -738,14 +759,9 @@ def _extract_pdf_strings(text: str) -> list[str]:
         if val:
             extracted.append(val)
     for m in PDF_HEX.finditer(text):
-        hx = re.sub(r"\s+", "", m.group(1))
-        if len(hx) % 2 == 1:
-            hx += "0"
-        raw_b = bytes.fromhex(hx)
-        if raw_b.startswith((b"\xfe\xff", b"\xff\xfe")):
-            extracted.append(_decode_pdf_bytes(raw_b))
-        elif all(32 <= b < 127 or b in (9, 10, 13) for b in raw_b):
-            extracted.append(raw_b.decode("ascii", errors="ignore"))
+        val = _decode_pdf_hex(m.group(1))
+        if val:
+            extracted.append(val)
     return extracted
 
 
@@ -803,18 +819,121 @@ def extract_pdf_text(raw: bytes) -> str | None:
     return "\n".join(parts)
 
 
+def extract_png_text(raw: bytes) -> str | None:
+    """Extract PNG metadata/text chunks, failing closed on malformed chunks or trailing data."""
+    if not raw.startswith(PNG_MAGIC):
+        return None
+    pos = len(PNG_MAGIC)
+    seen_ihdr = False
+    seen_iend = False
+    parts: list[str] = []
+    while pos + 8 <= len(raw):
+        clen, ctype = struct.unpack(">I4s", raw[pos:pos + 8])
+        data_start = pos + 8
+        data_end = data_start + clen
+        if data_end + 4 > len(raw):
+            return None
+        cdata = raw[data_start:data_end]
+        pos = data_end + 4
+        if ctype == b"IHDR":
+            seen_ihdr = True
+        elif ctype == b"IEND":
+            seen_iend = True
+            break
+        elif ctype in PNG_IMAGE_CHUNKS:
+            continue
+        elif ctype == b"tEXt":
+            parts.append(cdata.replace(b"\x00", b"\n").decode("latin-1"))
+        elif ctype in (b"zTXt", b"iCCP"):
+            sep = cdata.find(b"\x00")
+            if sep == -1 or sep + 2 > len(cdata) or cdata[sep + 1] != 0:
+                return None
+            parts.append(cdata[:sep].decode("latin-1"))
+            try:
+                parts.append(zlib.decompress(cdata[sep + 2:]).decode("latin-1"))
+            except zlib.error:
+                return None
+        elif ctype == b"iTXt":
+            sep1 = cdata.find(b"\x00")
+            if sep1 == -1 or sep1 + 3 > len(cdata):
+                return None
+            comp_flag, comp_method = cdata[sep1 + 1], cdata[sep1 + 2]
+            rest_parts = cdata[sep1 + 3:].split(b"\x00", 2)
+            if len(rest_parts) < 3:
+                return None
+            parts.append(cdata[:sep1].decode("utf-8", errors="ignore"))
+            text_bytes = rest_parts[2]
+            if comp_flag == 1:
+                if comp_method != 0:
+                    return None
+                try:
+                    text_bytes = zlib.decompress(text_bytes)
+                except zlib.error:
+                    return None
+            parts.append(text_bytes.decode("utf-8", errors="ignore"))
+        else:
+            parts.append(cdata.decode("utf-8", errors="ignore"))
+    if not seen_ihdr or not seen_iend or pos != len(raw):
+        return None
+    return "\n".join(parts)
+
+
+def extract_ico_text(raw: bytes) -> str | None:
+    """Validate ICO directory structure and scan embedded PNG images."""
+    if len(raw) < 6:
+        return None
+    reserved, itype, count = struct.unpack("<HHH", raw[:6])
+    if reserved != 0 or itype not in (1, 2) or count < 1:
+        return None
+    dir_end = 6 + 16 * count
+    if dir_end > len(raw):
+        return None
+    spans: list[tuple[int, int]] = []
+    for i in range(count):
+        base = 6 + 16 * i
+        size, offset = struct.unpack("<II", raw[base + 8:base + 16])
+        if size < 4 or offset < dir_end or offset + size > len(raw):
+            return None
+        spans.append((offset, offset + size))
+    spans.sort()
+    cursor = dir_end
+    parts: list[str] = []
+    for start, end in spans:
+        if start != cursor:
+            return None
+        cursor = end
+        entry = raw[start:end]
+        if entry.startswith(PNG_MAGIC):
+            png_txt = extract_png_text(entry)
+            if png_txt is None:
+                return None
+            if png_txt:
+                parts.append(png_txt)
+        else:
+            dib_size = struct.unpack("<I", entry[:4])[0]
+            if dib_size not in (12, 40, 52, 56, 108, 124) or len(entry) < dib_size:
+                return None
+    if cursor != len(raw):
+        return None
+    return "\n".join(parts)
+
+
 def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
     """Return ('text', str), ('skip', None), or ('unscanned_binary', None) for site/ assets."""
     rel = path.relative_to(root).as_posix()
     if not rel.startswith("site/"):
         return "skip", None
     suffix = path.suffix.lower()
-    if suffix == ".pdf":
-        text = extract_pdf_text(path.read_bytes())
-        return ("text", text) if text is not None else ("unscanned_binary", None)
-    if suffix in ALLOWED_BINARY_MEDIA_SUFFIXES:
-        return "skip", None
     raw = path.read_bytes()
+    if suffix == ".pdf":
+        text = extract_pdf_text(raw)
+        return ("text", text) if text is not None else ("unscanned_binary", None)
+    if suffix == ".png":
+        text = extract_png_text(raw)
+        return ("text", text) if text is not None else ("unscanned_binary", None)
+    if suffix == ".ico":
+        text = extract_ico_text(raw)
+        return ("text", text) if text is not None else ("unscanned_binary", None)
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
             return "text", raw.decode("utf-16")
