@@ -190,12 +190,21 @@ class LeakTest(CheckerTestCase):
             "site/assets/app.js.map",
             '{"sourceRoot":"gs://actual-prod-bucket/maps"}\n',
         )
+        self.write(
+            "site/dist/runtime-config.json",
+            '{"path":"/home/operator/prod/config","url":"https://actual-private-app.workers.dev"}\n',
+        )
+        self.write("site/build/audit.md", "# Build audit\n")
         dirty_report = self.report()
         check_style.check_leaks(self.root, dirty_report)
+        check_style.check_internal_paths(self.root, dirty_report)
         msgs = [m for _, m in dirty_report.findings]
         self.assertTrue(any("site/runtime-config.yaml" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/runtime-config.yaml" in m and "personal subdomain" in m for m in msgs))
         self.assertTrue(any("site/assets/app.js.map" in m and "non-placeholder bucket" in m for m in msgs))
+        self.assertTrue(any("site/dist/runtime-config.json" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/dist/runtime-config.json" in m and "personal subdomain" in m for m in msgs))
+        self.assertTrue(any("site/build/audit.md" in m and "tracked internal note" in m for m in msgs))
 
     def test_sha_in_url_is_not_reported(self):
         text = (

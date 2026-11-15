@@ -345,16 +345,26 @@ def is_untracked_gitignored(root: Path, rel_path: str) -> bool:
     return ignored.returncode == 0
 
 
+def should_skip_path(root: Path, path: Path) -> bool:
+    rel_parts = path.relative_to(root).parts
+    if ".git" in rel_parts:
+        return True
+    # Pages publishes the entire site/ directory, including site/dist or site/build.
+    if rel_parts and rel_parts[0] == "site":
+        return False
+    return any(part in SKIP_DIRS for part in rel_parts)
+
+
 def iter_files(root: Path):
     visible = git_visible_files(root)
     if visible is not None:
         for path in sorted(visible):
-            if any(part in SKIP_DIRS for part in path.parts):
+            if should_skip_path(root, path):
                 continue
             yield path
         return
     for path in sorted(root.rglob("*")):
-        if any(part in SKIP_DIRS for part in path.parts):
+        if should_skip_path(root, path):
             continue
         if path.is_file():
             yield path
@@ -670,18 +680,32 @@ def blank_fenced_blocks(text: str) -> str:
     return FENCED_BLOCK.sub(blank, text)
 
 
+BINARY_SITE_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".avif", ".bmp", ".tiff",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".wasm", ".zip", ".gz", ".br",
+    ".tar", ".pdf", ".mp3", ".mp4", ".mov", ".webm",
+}
+
+
 def read_deployed_site_text(root: Path, path: Path) -> str | None:
-    """Return UTF-8 text for any decodable non-binary file published under site/."""
+    """Return decoded text for any decodable non-binary file published under site/."""
     rel = path.relative_to(root).as_posix()
-    if not rel.startswith("site/"):
+    if not rel.startswith("site/") or path.suffix.lower() in BINARY_SITE_SUFFIXES:
         return None
     raw = path.read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            return None
     if b"\x00" in raw:
         return None
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return None
+        if any(b < 32 and b not in (9, 10, 13) for b in raw):
+            return None
+        return raw.decode("utf-8", errors="ignore")
 
 
 def check_leaks(root: Path, report: Report) -> None:
