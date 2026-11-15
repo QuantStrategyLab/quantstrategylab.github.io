@@ -1127,6 +1127,7 @@ DISALLOWED_SITE_CSS_RE = [
     (re.compile(r"(?i)(?<![a-z-])(?:transform|translate)\s*:\s*(?!none\b)[^;}]+"), "CSS transform visual positioning"),
     (re.compile(r"(?i)\bgrid-(?:template-areas|area)\s*:"), "CSS named grid-area placement"),
     (re.compile(r"(?i)\bgrid-auto-flow\s*:[^;}]*\bdense\b"), "CSS dense grid auto-placement"),
+    (re.compile(r"(?i)@(?:-[a-z]+-)?keyframes\b"), "CSS @keyframes animation"),
 ]
 DISALLOWED_SITE_HTML_RE = [
     (re.compile(r"(?i)<\s*(?:bdo|bdi)\b"), "HTML bidirectional override element"),
@@ -1145,6 +1146,12 @@ DISALLOWED_SITE_HTML_RE = [
     (
         re.compile(r"(?i)<\s*(?:details|dialog|select|option|textarea|input|canvas|audio|video|marquee|math)\b"),
         "unmodeled interactive or collapsible element in site/",
+    ),
+    (
+        re.compile(
+            r"(?i)<\s*(?:animate|animateMotion|animateTransform|set|discard|use|switch|clipPath|mask|filter|pattern|marker)\b"
+        ),
+        "SVG animation, reference, or masking element in site/",
     ),
 ]
 
@@ -1294,6 +1301,9 @@ def parse_style_decls(
     raw_decls: dict[str, str] = {}
     small_box_dims: list[str] = []
     clean = CSS_COMMENT_RE.sub("", unescape_css_literals(decl_text))
+    if "{" in clean or "}" in clean:
+        invalid.append("nested CSS block inside declarations")
+        return props, invalid
     for part in clean.split(";"):
         if ":" not in part:
             continue
@@ -1341,6 +1351,15 @@ def parse_style_decls(
                 props["clip"] = ("zero", imp)
             else:
                 invalid.append(f"clip:{v[:24]}")
+        elif k in ("animation", "transition"):
+            if vl != "none":
+                invalid.append(f"{k}:{v[:24]}")
+        elif k == "flex-direction":
+            if vl not in {"row", "column"}:
+                invalid.append(f"flex-direction:{v[:24]}")
+        elif k == "flex-wrap":
+            if vl not in {"nowrap", "wrap"}:
+                invalid.append(f"flex-wrap:{v[:24]}")
         elif k == "font-size":
             if CSS_DYNAMIC_FUNC_RE.search(vl):
                 invalid.append(f"font-size:{v[:24]}")
@@ -1559,8 +1578,18 @@ def parse_css_stylesheet(
     }
     i, n = 0, len(clean)
     while i < n:
+        semi = clean.find(";", i)
         brace = clean.find("{", i)
+        if semi != -1 and (brace == -1 or semi < brace):
+            stmt = clean[i:semi].strip()
+            if stmt and not re.match(r'(?i)^@charset\s+"utf-8"$', stmt):
+                issues.append(f"unmodeled CSS statement ({stmt[:36]})")
+            i = semi + 1
+            continue
         if brace == -1:
+            rem = clean[i:].strip()
+            if rem:
+                issues.append(f"unmodeled trailing CSS text ({rem[:36]})")
             break
         prelude = clean[i:brace].strip()
         depth = 1
@@ -1599,6 +1628,8 @@ def parse_css_stylesheet(
                 )
                 rules.extend(sub_rules)
                 issues.extend(sub_issues)
+            else:
+                issues.append(f"unmodeled CSS at-rule ({prelude[:36]})")
             continue
         props, bad_vals = parse_style_decls(
             body,
@@ -1900,6 +1931,8 @@ class _RenderedHTMLNormalizer(HTMLParser):
     def _handle_attrs(self, attrs: list[tuple[str, str | None]]) -> None:
         for k, v in attrs:
             kl = k.lower()
+            if kl in ("display", "visibility", "opacity", "clip", "clip-path", "transform", "filter", "mask"):
+                self.html_issues.append(f"presentation hiding or layout attribute in site/ ({kl})")
             if re.match(r"^on[a-z]{2,}$", kl):
                 self.html_issues.append(f"inline event handler attribute in site/ ({kl})")
             if not v:

@@ -438,6 +438,16 @@ class LeakTest(CheckerTestCase):
             '<p>actual-private-app.work<span class="hidden">SAFE</span>ers.dev</p>\n',
         )
         self.write("site/zero-width-hide.html", "<style>.z{width:0;overflow:hidden}</style>\n<p>x</p>\n")
+        self.write(
+            "site/animation-order.css",
+            "@keyframes flip { from { order: 1; } to { order: 2; } }\n.a { animation: flip 1s infinite; }\n",
+        )
+        self.write(
+            "site/animation-order.html",
+            '<link rel="stylesheet" href="animation-order.css">\n'
+            '<div style="display:flex"><span class="a">/prod/config</span><span>/home/operator</span></div>\n',
+        )
+        self.write("site/stmt-desync.css", "@layer reset; .x { order: 2; }\n")
 
         extra_report = self.report()
         check_style.check_leaks(self.root, extra_report)
@@ -456,6 +466,9 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/sr-only-sentinel.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/clip-path-hide.html" in m and "unmodeled CSS property (clip-path)" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/zero-width-hide.html" in m and "sub-2px box dimension hiding" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/animation-order.css" in m and "CSS @keyframes animation" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/animation-order.css" in m and "animation:" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/stmt-desync.css" in m and "unmodeled CSS statement" in m for m in extra_msgs), extra_msgs)
 
     def test_public_markdown_scans_account_and_internal_host_identifiers(self):
         self.write(
