@@ -175,8 +175,11 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("absolute home path" in m for m in path_found))
 
     def test_deployed_site_text_assets_are_scanned_for_identifier_leaks(self):
+        import pathlib
         import struct
         import zlib
+
+        repo_root = pathlib.Path(check_style.__file__).resolve().parent.parent
 
         def png_chunk(ctype: bytes, data: bytes) -> bytes:
             return struct.pack(">I4s", len(data), ctype) + data + struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
@@ -192,15 +195,20 @@ class LeakTest(CheckerTestCase):
             return header + entry + png_bytes
 
         clean_png = make_png()
-        self.write("site/index.html", '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n')
+        self.write(
+            "site/index.html",
+            '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n'
+            "<p>Visit QuantStrategyLab.</p><p>local notes</p>\n",
+        )
         self.write(
             "site/assets/styles.css",
             "a::before { content: ''; }\n"
             "/* example 192.0.2.1 2001:db8::1 your-host.internal arn:aws:iam::000000000000:role/example your-sa@example.iam.gserviceaccount.com */\n",
         )
+        self.write("site/clean.json", '{"account_id": "000000000000"}\n')
         self.write("site/YOUR_SUBDOMAIN.workers.dev/index.html", "<p>placeholder path</p>\n")
-        (self.root / "site/logo.png").write_bytes(clean_png)
-        (self.root / "site/favicon.ico").write_bytes(make_ico(clean_png))
+        (self.root / "site/landing-light-192.png").write_bytes((repo_root / "site/landing-light-192.png").read_bytes())
+        (self.root / "site/favicon.ico").write_bytes((repo_root / "site/favicon.ico").read_bytes())
         clean_report = self.report()
         check_style.check_leaks(self.root, clean_report)
         self.assertEqual(clean_report.findings, [])
@@ -213,6 +221,24 @@ class LeakTest(CheckerTestCase):
             "role: arn:aws:iam::123456789012:role/site-publisher\n"
             "sa: deployer@quant-prod-42.iam.gserviceaccount.com\n"
             "account_id: '123456789012'\n",
+        )
+        self.write(
+            "site/runtime-config.json",
+            '{"account_id": "123456789012", "tenantId": "12345678-1234-1234-1234-1234567890ab"}\n',
+        )
+        self.write(
+            "site/rendered-leak.html",
+            '<p>&#47;home&#47;<strong>operator</strong>&#47;prod&#47;config and '
+            'db-primary&#46;<span>ops</span>&#46;internal</p>'
+            '<a href="https:&#47;&#47;actual-private-app&#46;workers&#46;dev">x</a>\n',
+        )
+        self.write(
+            "site/escaped-leak.js",
+            'const p = "\\u002fhome\\u002foperator\\u002fprod\\u002fconfig";\n',
+        )
+        self.write(
+            "site/data-uri.html",
+            '<img src="data:image/png;base64,iVBORw0KGgo=">\n',
         )
         self.write("site/actual-private-app.workers.dev/index.html", "<p>benign page content</p>\n")
         self.write("site/db-primary.ops.internal/cfg.html", "<p>benign internal path</p>\n")
@@ -230,6 +256,9 @@ class LeakTest(CheckerTestCase):
             "site/private-ip.html",
             "<!-- internal: http://10.23.45.67:8080, v6: http://[fd12:3456:789a::1]/api, meta: 169.254.169.254, ll: fe80::1 -->\n",
         )
+        (self.root / "site/unapproved-pixel.png").write_bytes(clean_png)
+        (self.root / "site/unapproved.ico").write_bytes(make_ico(clean_png))
+        (self.root / "site/landing-light-192.png").write_bytes(clean_png)
         (self.root / "site/leak-meta.png").write_bytes(
             make_png(
                 png_chunk(b"tEXt", b"Comment\x00deploy /home/operator/prod/config http://10.23.45.67"),
@@ -257,11 +286,21 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/leak-meta.png" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "private IPv4 address" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "personal subdomain" in m for m in msgs))
+        self.assertTrue(any("site/leak-meta.png" in m and "unapproved or uninspected raster asset" in m for m in msgs))
+        self.assertTrue(any("site/unapproved-pixel.png" in m and "unapproved or uninspected raster asset" in m for m in msgs))
+        self.assertTrue(any("site/unapproved.ico" in m and "unapproved or uninspected raster asset" in m for m in msgs))
+        self.assertTrue(any("site/landing-light-192.png" in m and "unapproved or uninspected raster asset" in m for m in msgs))
         self.assertTrue(any("site/release.pdf" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/bundle.zip" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/corrupt.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/runtime-config.yaml" in m and "internal hostname" in m for m in msgs))
         self.assertEqual(sum(1 for m in msgs if "site/runtime-config.yaml" in m and "account identifier" in m), 3)
+        self.assertEqual(sum(1 for m in msgs if "site/runtime-config.json" in m and "account identifier" in m), 2)
+        self.assertTrue(any("site/rendered-leak.html" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/rendered-leak.html" in m and "internal hostname" in m for m in msgs))
+        self.assertTrue(any("site/rendered-leak.html" in m and "personal subdomain" in m for m in msgs))
+        self.assertTrue(any("site/escaped-leak.js" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/data-uri.html" in m and "embedded data URI asset" in m for m in msgs))
         self.assertTrue(any("site/actual-private-app.workers.dev/index.html" in m and "personal subdomain" in m for m in msgs))
         self.assertTrue(any("site/db-primary.ops.internal/cfg.html" in m and "internal hostname" in m for m in msgs))
 

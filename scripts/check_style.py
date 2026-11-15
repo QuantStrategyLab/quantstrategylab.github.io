@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
+import html
 import ipaddress
 import re
 import struct
@@ -39,6 +41,7 @@ import sys
 import unicodedata
 import urllib.parse
 import zlib
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import NamedTuple
 
@@ -684,19 +687,92 @@ def blank_fenced_blocks(text: str) -> str:
 
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-PNG_IMAGE_CHUNKS = {
-    b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
+PNG_EXTRA_IMAGE_CHUNKS = {
+    b"PLTE", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
     b"sBIT", b"bKGD", b"hIST", b"pHYs", b"tIME",
+}
+PNG_CHANNELS = {0: 1, 2: 3, 4: 2, 6: 4}
+
+APPROVED_SITE_RASTERS: dict[str, list[tuple[int, int, int, int, int, str]]] = {
+    "site/favicon.ico": [
+        (16, 16, 8, 6, 0, "fba8bde649a5423b2934c86a8705d476694fb712fb8da98a80496ccb715889a7"),
+        (32, 32, 8, 6, 0, "9e27f396de07f6e3052d6a197ae10408596f79dba02a70e67c929e080e8df292"),
+        (48, 48, 8, 6, 0, "1786525e5efbafbd75de650f5a2a53cfdc3fe39ff2d388eba49f87cb892908c2"),
+    ],
+    "site/landing-light-192.png": [
+        (192, 192, 8, 6, 0, "26aa89b6369a45ace2c47db94d2eee28ed812caa92bc591fd59782e1aedf6124"),
+    ],
+    "site/landing-light-512.png": [
+        (512, 512, 8, 6, 0, "bdaabe227116fc88c75bde2110a00e1e6a64448a853137cdc512c4d2ebc1251a"),
+    ],
+    "site/landing-light-apple-touch-180.png": [
+        (180, 180, 8, 6, 0, "2db31b1e3ce7507ed4e9323d948d2bbc714d4033c6fd40c8cefbf995a6f053d5"),
+    ],
+    "site/landing-light-maskable-512.png": [
+        (512, 512, 8, 6, 0, "61aa86a2070e1187bd23e501a7df0fb8152dbba1024e36db63d4f50806cde018"),
+    ],
 }
 
 
-def extract_png_text(raw: bytes) -> str | None:
-    """Validate PNG container/CRC/IDAT and extract tEXt/zTXt/iTXt chunks, or fail closed."""
+def unfilter_png_scanlines(
+    decomp: bytes, width: int, height: int, bit_depth: int, color_type: int
+) -> bytes | None:
+    """Reconstruct unfiltered raw pixel bytes for non-interlaced 8/16-bit PNGs."""
+    channels = PNG_CHANNELS.get(color_type)
+    if channels is None or bit_depth not in (8, 16) or width < 1 or height < 1:
+        return None
+    bpp = channels * (bit_depth // 8)
+    stride = width * bpp
+    if len(decomp) != (stride + 1) * height:
+        return None
+    out = bytearray(stride * height)
+    for y in range(height):
+        row_start = y * (stride + 1)
+        ftype = decomp[row_start]
+        row = decomp[row_start + 1:row_start + 1 + stride]
+        base = y * stride
+        if ftype == 0:
+            out[base:base + stride] = row
+        elif ftype == 1:
+            for i in range(stride):
+                a = out[base + i - bpp] if i >= bpp else 0
+                out[base + i] = (row[i] + a) & 0xFF
+        elif ftype == 2:
+            prev = base - stride
+            for i in range(stride):
+                b = out[prev + i] if y > 0 else 0
+                out[base + i] = (row[i] + b) & 0xFF
+        elif ftype == 3:
+            prev = base - stride
+            for i in range(stride):
+                a = out[base + i - bpp] if i >= bpp else 0
+                b = out[prev + i] if y > 0 else 0
+                out[base + i] = (row[i] + ((a + b) >> 1)) & 0xFF
+        elif ftype == 4:
+            prev = base - stride
+            for i in range(stride):
+                a = out[base + i - bpp] if i >= bpp else 0
+                b = out[prev + i] if y > 0 else 0
+                c = out[prev + i - bpp] if (y > 0 and i >= bpp) else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                out[base + i] = (row[i] + pr) & 0xFF
+        else:
+            return None
+    return bytes(out)
+
+
+def inspect_png_asset(
+    raw: bytes,
+) -> tuple[str, tuple[int, int, int, int, int, str], bool] | None:
+    """Validate PNG structure/CRCs/scanlines and return (metadata_text, sig, clean_chunks)."""
     if not raw.startswith(PNG_MAGIC):
         return None
     pos = len(PNG_MAGIC)
-    seen_ihdr = False
+    ihdr: tuple[int, int, int, int, int] | None = None
     seen_iend = False
+    extra_image_chunks = False
     idat_parts: list[bytes] = []
     parts: list[str] = []
     while pos + 8 <= len(raw):
@@ -710,18 +786,24 @@ def extract_png_text(raw: bytes) -> str | None:
         if (zlib.crc32(ctype + cdata) & 0xFFFFFFFF) != expected_crc:
             return None
         pos = data_end + 4
-        if not seen_ihdr:
-            if ctype != b"IHDR":
+        if ihdr is None:
+            if ctype != b"IHDR" or len(cdata) != 13:
                 return None
-            seen_ihdr = True
+            width, height, bit_depth, color_type, comp, flt, interlace = struct.unpack(">IIBBBBB", cdata)
+            if width < 1 or height < 1 or comp != 0 or flt != 0 or interlace != 0:
+                return None
+            ihdr = (width, height, bit_depth, color_type, interlace)
             continue
+        if ctype == b"IHDR":
+            return None
         if ctype == b"IEND":
             seen_iend = True
             break
         if ctype == b"IDAT":
             idat_parts.append(cdata)
             continue
-        if ctype in PNG_IMAGE_CHUNKS:
+        if ctype in PNG_EXTRA_IMAGE_CHUNKS:
+            extra_image_chunks = True
             continue
         if ctype == b"tEXt":
             if b"\x00" not in cdata:
@@ -761,17 +843,25 @@ def extract_png_text(raw: bytes) -> str | None:
                 return None
         else:
             return None
-    if not seen_ihdr or not seen_iend or pos != len(raw) or not idat_parts:
+    if ihdr is None or not seen_iend or pos != len(raw) or not idat_parts:
         return None
     try:
-        zlib.decompress(b"".join(idat_parts))
+        decomp = zlib.decompress(b"".join(idat_parts))
     except zlib.error:
         return None
-    return "\n".join(parts)
+    width, height, bit_depth, color_type, interlace = ihdr
+    pixels = unfilter_png_scanlines(decomp, width, height, bit_depth, color_type)
+    if pixels is None:
+        return None
+    sig = (width, height, bit_depth, color_type, interlace, hashlib.sha256(pixels).hexdigest())
+    clean_chunks = not extra_image_chunks and not parts
+    return "\n".join(parts), sig, clean_chunks
 
 
-def extract_ico_text(raw: bytes) -> str | None:
-    """Validate ICO directory structure and require every image entry to be valid PNG."""
+def inspect_ico_asset(
+    raw: bytes,
+) -> tuple[str, list[tuple[int, int, int, int, int, str]], bool] | None:
+    """Validate ICO directory structure and embedded PNG frames."""
     if len(raw) < 6:
         return None
     reserved, itype, count = struct.unpack("<HHH", raw[:6])
@@ -790,6 +880,8 @@ def extract_ico_text(raw: bytes) -> str | None:
     spans.sort()
     cursor = dir_end
     parts: list[str] = []
+    sigs: list[tuple[int, int, int, int, int, str]] = []
+    clean_all = True
     for start, end in spans:
         if start != cursor:
             return None
@@ -797,29 +889,42 @@ def extract_ico_text(raw: bytes) -> str | None:
         entry = raw[start:end]
         if not entry.startswith(PNG_MAGIC):
             return None
-        png_txt = extract_png_text(entry)
-        if png_txt is None:
+        png_info = inspect_png_asset(entry)
+        if png_info is None:
             return None
+        png_txt, sig, png_clean = png_info
+        sigs.append(sig)
+        clean_all = clean_all and png_clean
         if png_txt:
             parts.append(png_txt)
     if cursor != len(raw):
         return None
-    return "\n".join(parts)
+    return "\n".join(parts), sigs, clean_all
 
 
 def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
-    """Return ('text', str), ('skip', None), or ('unscanned_binary', None) for site/ assets."""
+    """Return ('text', str), ('unapproved_raster', str), ('skip', None), or ('unscanned_binary', None)."""
     rel = path.relative_to(root).as_posix()
     if not rel.startswith("site/"):
         return "skip", None
     suffix = path.suffix.lower()
     raw = path.read_bytes()
     if suffix == ".png":
-        text = extract_png_text(raw)
-        return ("text", text) if text is not None else ("unscanned_binary", None)
+        inspected = inspect_png_asset(raw)
+        if inspected is None:
+            return "unscanned_binary", None
+        text, sig, clean_chunks = inspected
+        if clean_chunks and [sig] == APPROVED_SITE_RASTERS.get(rel):
+            return "text", text
+        return "unapproved_raster", text
     if suffix == ".ico":
-        text = extract_ico_text(raw)
-        return ("text", text) if text is not None else ("unscanned_binary", None)
+        inspected = inspect_ico_asset(raw)
+        if inspected is None:
+            return "unscanned_binary", None
+        text, sigs, clean_chunks = inspected
+        if clean_chunks and sigs == APPROVED_SITE_RASTERS.get(rel):
+            return "text", text
+        return "unapproved_raster", text
     if suffix == ".pdf":
         return "unscanned_binary", None
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -898,6 +1003,172 @@ def account_field_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
     return len(set(val)) > 1
 
 
+INVISIBLE_FORMAT_RE = re.compile(r"[\u00ad\u200b\u200c\u200d\u2060\ufeff]")
+JS_ESCAPE_RE = re.compile(
+    r"\\(?:u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([/'\"\\]))"
+)
+CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?")
+INLINE_DISPLAY_RE = re.compile(r"(?i)\bdisplay\s*:\s*(?:inline(?:-[a-z-]+)?|contents)\b")
+HTML_BLOCK_TAGS = {
+    "address", "article", "aside", "blockquote", "body", "br", "caption", "dd",
+    "details", "dialog", "div", "dl", "dt", "fieldset", "figcaption", "figure",
+    "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
+    "hgroup", "hr", "html", "li", "link", "main", "menu", "meta", "nav",
+    "noscript", "ol", "option", "p", "pre", "script", "section", "style",
+    "summary", "table", "tbody", "td", "template", "tfoot", "th", "thead",
+    "title", "tr", "ul", "text",
+}
+
+
+def unescape_js_literals(text: str) -> str:
+    """Decode JS/JSON unicode, hex, and slash escapes for identifier scanning."""
+    def _repl(match: re.Match) -> str:
+        g1, g2, g3, g4 = match.groups()
+        if g4 is not None:
+            return g4
+        cp = int(g1 or g2 or g3, 16)
+        if 0 <= cp <= 0x10FFFF and not (0xD800 <= cp <= 0xDFFF):
+            return chr(cp)
+        return match.group(0)
+
+    return JS_ESCAPE_RE.sub(_repl, text)
+
+
+def unescape_css_literals(text: str) -> str:
+    """Decode CSS hex codepoint escapes for identifier scanning."""
+    def _repl(match: re.Match) -> str:
+        cp = int(match.group(1), 16)
+        if 0 < cp <= 0x10FFFF and not (0xD800 <= cp <= 0xDFFF):
+            return chr(cp)
+        return match.group(0)
+
+    return CSS_ESCAPE_RE.sub(_repl, text)
+
+
+class _RenderedHTMLNormalizer(HTMLParser):
+    def __init__(self, depth: int = 0) -> None:
+        super().__init__(convert_charrefs=True)
+        self.depth = depth
+        self.inline_parts: list[str] = []
+        self.attr_lines: list[str] = []
+        self.comment_lines: list[str] = []
+        self.subtrees: list[str] = []
+        self._tag_stack: list[tuple[str, bool]] = []
+        self._raw_tag: str | None = None
+        self._raw_chunks: list[str] = []
+
+    @staticmethod
+    def _has_inline_display(attrs: list[tuple[str, str | None]]) -> bool:
+        for k, v in attrs:
+            if k.lower() == "style" and v and INLINE_DISPLAY_RE.search(v):
+                return True
+        return False
+
+    def _handle_attrs(self, attrs: list[tuple[str, str | None]]) -> None:
+        for k, v in attrs:
+            if not v:
+                continue
+            self.attr_lines.append(f"{k}={v}")
+            if "%" in v:
+                self.attr_lines.append(f"{k}={urllib.parse.unquote(v)}")
+            if k.lower() == "srcdoc" and self.depth < 3:
+                self.subtrees.append(normalize_html_text(v, self.depth + 1))
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        is_block = (t in HTML_BLOCK_TAGS) and not self._has_inline_display(attrs)
+        self._tag_stack.append((t, is_block))
+        if is_block:
+            self.inline_parts.append("\n")
+        self._handle_attrs(attrs)
+        if t in ("script", "style"):
+            self._raw_tag = t
+            self._raw_chunks = []
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if (t in HTML_BLOCK_TAGS) and not self._has_inline_display(attrs):
+            self.inline_parts.append("\n")
+        self._handle_attrs(attrs)
+
+    def _flush_raw_tag(self, tag_name: str) -> None:
+        raw_body = "".join(self._raw_chunks)
+        if tag_name == "script":
+            dec = unescape_js_literals(raw_body)
+            self.subtrees.append(dec)
+            if ("<" in dec or "&" in dec) and self.depth < 3:
+                self.subtrees.append(normalize_html_text(dec, self.depth + 1))
+        elif tag_name == "style":
+            self.subtrees.append(unescape_css_literals(raw_body))
+        self._raw_tag = None
+        self._raw_chunks = []
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if self._raw_tag == t:
+            self._flush_raw_tag(t)
+        is_block = t in HTML_BLOCK_TAGS
+        for idx in range(len(self._tag_stack) - 1, -1, -1):
+            if self._tag_stack[idx][0] == t:
+                _, is_block = self._tag_stack[idx]
+                del self._tag_stack[idx:]
+                break
+        if is_block:
+            self.inline_parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._raw_tag is not None:
+            self._raw_chunks.append(data)
+            return
+        self.inline_parts.append(data)
+
+    def handle_comment(self, data: str) -> None:
+        self.comment_lines.append(html.unescape(data))
+
+
+def normalize_html_text(text: str, depth: int = 0) -> str:
+    """Canonicalize rendered HTML/SVG text, attributes, comments, and scripts."""
+    parser = _RenderedHTMLNormalizer(depth=depth)
+    parser.feed(text)
+    parser.close()
+    if parser._raw_tag is not None:
+        parser._flush_raw_tag(parser._raw_tag)
+    combined = "\n".join([
+        "".join(parser.inline_parts),
+        "\n".join(parser.attr_lines),
+        "\n".join(parser.comment_lines),
+        *parser.subtrees,
+    ])
+    return INVISIBLE_FORMAT_RE.sub("", combined)
+
+
+def normalized_site_views(path: Path, text: str) -> list[str]:
+    """Build raw and decoded/rendered views of a deployed site/ text asset."""
+    views: list[str] = []
+
+    def _add(candidate: str) -> None:
+        if candidate and candidate not in views:
+            views.append(candidate)
+
+    _add(text)
+    stripped = INVISIBLE_FORMAT_RE.sub("", text)
+    _add(stripped)
+    js_dec = INVISIBLE_FORMAT_RE.sub("", unescape_js_literals(text))
+    _add(js_dec)
+    suffix = path.suffix.lower()
+    if suffix in (".css", ".html", ".htm", ".xhtml", ".svg"):
+        _add(INVISIBLE_FORMAT_RE.sub("", unescape_css_literals(text)))
+    if suffix in (".html", ".htm", ".xhtml", ".svg", ".xml") or "<" in js_dec or "&" in js_dec:
+        _add(normalize_html_text(text))
+        if js_dec != text:
+            _add(normalize_html_text(js_dec))
+    return views
+
+
+def always_report(text: str, match: re.Match, ctx: FileContext) -> bool:
+    return True
+
+
 SITE_LEAK_PATTERNS = [
     (
         re.compile(r"(?<![0-9.])\d{1,3}(?:\.\d{1,3}){3}(?![0-9.])"),
@@ -939,17 +1210,33 @@ SITE_LEAK_PATTERNS = [
     ),
     (
         re.compile(
-            r"""(?i)\b(?:aws_?account_?id|account_?id|tenant_?id|subscription_?id)\b"""
-            r"""\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{12})["']?"""
+            r"""(?i)\b(?:aws[-_]?account[-_]?id|account[-_]?id|tenant[-_]?id|subscription[-_]?id)\b"""
+            r"""(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{12})(?:\\?["'])?(?![0-9a-f-])"""
         ),
         "publish",
         "account identifier (section 13)",
         account_field_is_real,
     ),
+    (
+        re.compile(
+            r"(?i)\bdata:(?:image|application|audio|video|font|model|multipart|text)/"
+            r"[a-z0-9.+_-]+(?:;[a-z0-9=+._-]+)*,"
+        ),
+        "publish",
+        "embedded data URI asset requires direct file scan (section 13)",
+        always_report,
+    ),
 ]
 
 
-def _scan_leak_patterns(rel: str, text: str, patterns, ctx: FileContext, report: Report) -> None:
+def _scan_leak_patterns(
+    rel: str,
+    text: str,
+    patterns,
+    ctx: FileContext,
+    report: Report,
+    seen: set[tuple[str, str]] | None = None,
+) -> None:
     for pattern, category, label, predicate in patterns:
         for match in pattern.finditer(text):
             # A pattern without a predicate describes prose, and a fenced
@@ -959,7 +1246,12 @@ def _scan_leak_patterns(rel: str, text: str, patterns, ctx: FileContext, report:
                 continue
             if predicate is not None and not predicate(text, match, ctx):
                 continue
-            report.add(category, f"{rel}: {label}: {match.group(0)[:40]}")
+            item = (category, f"{rel}: {label}: {match.group(0)[:40]}")
+            if seen is not None:
+                if item in seen:
+                    continue
+                seen.add(item)
+            report.add(*item)
 
 
 def check_leaks(root: Path, report: Report) -> None:
@@ -968,9 +1260,16 @@ def check_leaks(root: Path, report: Report) -> None:
         rel = path.relative_to(root).as_posix()
         markdown = is_markdown(path)
         if rel.startswith("site/"):
+            seen_for_file: set[tuple[str, str]] = set()
             site_rel_path = "/" + rel[len("site/"):]
-            path_ctx = FileContext(url_spans=[], prose=site_rel_path, masked=site_rel_path)
-            _scan_leak_patterns(rel, site_rel_path, site_path_patterns, path_ctx, report)
+            path_views = [site_rel_path]
+            if "%" in site_rel_path:
+                decoded_rel_path = urllib.parse.unquote(site_rel_path)
+                if decoded_rel_path != site_rel_path:
+                    path_views.append(decoded_rel_path)
+            for pv in path_views:
+                path_ctx = FileContext(url_spans=[], prose=pv, masked=pv)
+                _scan_leak_patterns(rel, pv, site_path_patterns, path_ctx, report, seen_for_file)
             status, site_text = read_deployed_site_asset(root, path)
             if status == "unscanned_binary":
                 report.add(
@@ -978,24 +1277,39 @@ def check_leaks(root: Path, report: Report) -> None:
                     f"{rel}: unscanned binary or encrypted asset in published site/ tree (section 13)",
                 )
                 continue
-            if status != "text" or site_text is None:
+            if status == "unapproved_raster":
+                report.add(
+                    "publish",
+                    f"{rel}: unapproved or uninspected raster asset in published site/ tree (section 13)",
+                )
+                if not site_text:
+                    continue
+            elif status != "text" or site_text is None:
                 continue
-            text = site_text
+            patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:3])
+            patterns.extend(SITE_LEAK_PATTERNS)
+            for view in normalized_site_views(path, site_text):
+                prose = blank_fenced_blocks(view) if markdown else view
+                masked = blank_code_spans(prose) if markdown else view
+                ctx = FileContext(
+                    url_spans=[(m.start(), m.end()) for m in URL_TOKEN.finditer(view)],
+                    prose=prose,
+                    masked=masked,
+                )
+                _scan_leak_patterns(rel, view, patterns, ctx, report, seen_for_file)
+            continue
         elif markdown:
             text = path.read_text(encoding="utf-8", errors="ignore")
         else:
             continue
-        prose = blank_fenced_blocks(text) if markdown else text
-        masked = blank_code_spans(prose) if markdown else text
+        prose = blank_fenced_blocks(text)
+        masked = blank_code_spans(prose)
         ctx = FileContext(
             url_spans=[(m.start(), m.end()) for m in URL_TOKEN.finditer(text)],
             prose=prose,
             masked=masked,
         )
-        patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:3])
-        if rel.startswith("site/"):
-            patterns.extend(SITE_LEAK_PATTERNS)
-        _scan_leak_patterns(rel, text, patterns, ctx, report)
+        _scan_leak_patterns(rel, text, list(LEAK_PATTERNS), ctx, report)
 
 
 def matching_internal_note_pattern(rel: str) -> str | None:
