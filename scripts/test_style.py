@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import re
 import subprocess
 import tempfile
 import unittest
@@ -216,11 +217,18 @@ class LeakTest(CheckerTestCase):
             return header + entry + png_bytes
 
         clean_png = make_png()
+        approved_inline_svg = re.search(
+            r"<svg\b.*?</svg>",
+            (repo_root / "site/index.html").read_text(encoding="utf-8"),
+            re.S,
+        )
+        assert approved_inline_svg is not None
         self.write(
             "site/index.html",
             '<link rel="stylesheet" href="assets/styles.css">\n'
             '<script src="assets/i18n.js" defer></script>\n'
             '<script src="assets/app.js" defer></script>\n'
+            f"{approved_inline_svg.group(0)}\n"
             '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n'
             "<p>Visit QuantStrategyLab.</p>\n"
             "<p>Public architecture notes.</p>\n",
@@ -234,6 +242,7 @@ class LeakTest(CheckerTestCase):
         self.write("site/clean.json", '{"account_id": "000000000000"}\n')
         self.write("site/YOUR_SUBDOMAIN.workers.dev/index.html", "<p>placeholder path</p>\n")
         (self.root / "site/landing-light-192.png").write_bytes((repo_root / "site/landing-light-192.png").read_bytes())
+        (self.root / "site/landing-light.svg").write_bytes((repo_root / "site/landing-light.svg").read_bytes())
         (self.root / "site/favicon.ico").write_bytes((repo_root / "site/favicon.ico").read_bytes())
         (self.root / "site/assets").mkdir(parents=True, exist_ok=True)
         (self.root / "site/assets/app.js").write_bytes((repo_root / "site/assets/app.js").read_bytes())
@@ -471,6 +480,24 @@ class LeakTest(CheckerTestCase):
             '<link rel="stylesheet" href="assets/styles.css">\n'
             '<ol class="prin" style="display:flex"><span>actual-private-</span><li style="display:inline">workers.dev</li></ol>\n',
         )
+        self.write(
+            "site/flex-zero-clip.html",
+            "<style>.w{display:flex}.z{flex:0 0 0;overflow:hidden}</style>"
+            '<div class="w"><span>actual-private-app.work</span><span class="z">SAFE</span><span>ers.dev</span></div>\n',
+        )
+        self.write(
+            "site/grid-zero-track.html",
+            '<div style="display:grid;grid-template-columns:auto 0px auto">'
+            "<span>actual-private-app.work</span><span>SAFE</span><span>ers.dev</span></div>\n",
+        )
+        self.write(
+            "site/outlined-leak.svg",
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 20"><path d="M1 1h10"/></svg>\n',
+        )
+        self.write(
+            "site/inline-vector.html",
+            '<p>x</p><svg viewBox="0 0 10 10"><path d="M0 0h5"/></svg>\n',
+        )
 
         extra_report = self.report()
         check_style.check_leaks(self.root, extra_report)
@@ -500,6 +527,12 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/percent-config.json" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/dot-pseudo.html" in m and "CSS content text injection" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/prin-abuse.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/flex-zero-clip.html" in m and "flex:0 0 0" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/flex-zero-clip.html" in m and "overflow:hidden without clip:rect(0,0,0,0)" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/flex-zero-clip.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/grid-zero-track.html" in m and "grid-template-columns:" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/outlined-leak.svg" in m and "unapproved or uninspected vector asset" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/inline-vector.html" in m and "unapproved inline vector graphic" in m for m in extra_msgs), extra_msgs)
 
     def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
         self.write(

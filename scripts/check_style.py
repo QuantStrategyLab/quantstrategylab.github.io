@@ -755,6 +755,18 @@ APPROVED_SITE_SCRIPT_FILES: dict[str, str] = {
 APPROVED_SITE_INLINE_SCRIPTS: set[str] = {
     "df216a14d05020b1d67c017b9252c0390dcfd70f727e188f42d8b92ac557637f",
 }
+APPROVED_SITE_VECTOR_FILES: dict[str, str] = {
+    "site/landing-light.svg": "82688b5a7a13ae562efffc5b3cebf9060ddf8d8c95a593441ada3cd5e3a92c85",
+}
+APPROVED_SITE_INLINE_SVGS: set[str] = {
+    "d2148efc230494e3ed92cfc84f356d3cbe3a2436e60a125640e981106d518c07",
+    "63ceec9a23ee08da79fcc3022b56d4908a34d0268982d1d5596892d09af3bb47",
+    "e89ab06f8dca3c8bfb330fa5f17eb3ce8f6c1efc0940b79ee691e66948c3aa70",
+}
+ALLOWED_SITE_TEXT_SUFFIXES: set[str] = {
+    ".html", ".htm", ".css", ".json", ".webmanifest",
+    ".yaml", ".yml", ".toml", ".txt", ".md", ".map",
+}
 
 
 def resolve_site_asset_href(page_rel: str, href: str) -> str | None:
@@ -992,7 +1004,7 @@ def _decode_site_text(raw: bytes) -> tuple[str, str | None]:
 
 
 def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
-    """Return ('text', str), ('unapproved_raster', str), ('unapproved_script', str), ('skip', None), or ('unscanned_binary', None)."""
+    """Return ('text', str), ('unapproved_raster', str), ('unapproved_vector', str), ('unapproved_script', str), ('skip', None), or ('unscanned_binary', None)."""
     rel = path.relative_to(root).as_posix()
     if not rel.startswith("site/"):
         return "skip", None
@@ -1014,16 +1026,26 @@ def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
         if clean_chunks and sigs == APPROVED_SITE_RASTERS.get(rel):
             return "text", text
         return "unapproved_raster", text
-    if suffix == ".pdf":
-        return "unscanned_binary", None
-    text_status, text = _decode_site_text(raw)
-    if text_status != "text" or text is None:
-        return "unscanned_binary", None
+    if suffix == ".svg":
+        text_status, text = _decode_site_text(raw)
+        if text_status != "text" or text is None:
+            return "unscanned_binary", None
+        if hashlib.sha256(raw).hexdigest() == APPROVED_SITE_VECTOR_FILES.get(rel):
+            return "text", text
+        return "unapproved_vector", text
     if suffix in SITE_SCRIPT_SUFFIXES:
+        text_status, text = _decode_site_text(raw)
+        if text_status != "text" or text is None:
+            return "unscanned_binary", None
         if hashlib.sha256(raw).hexdigest() == APPROVED_SITE_SCRIPT_FILES.get(rel):
             return "text", text
         return "unapproved_script", text
-    return "text", text
+    if suffix in ALLOWED_SITE_TEXT_SUFFIXES:
+        text_status, text = _decode_site_text(raw)
+        if text_status != "text" or text is None:
+            return "unscanned_binary", None
+        return "text", text
+    return "unscanned_binary", None
 
 
 INTERNAL_IPV4_NETWORKS = (
@@ -1154,6 +1176,12 @@ DISALLOWED_SITE_HTML_RE = [
         "SVG animation, reference, or masking element in site/",
     ),
     (re.compile(r"(?i)<\s*(?:script|style)\b[^>]*/>"), "self-closing script or style tag in site/"),
+    (
+        re.compile(
+            r"(?i)<\s*(?:img|source)\b[^>]*\b(?:src|srcset)\s*=\s*[\"']?\s*(?:https?:|//|data:|javascript:|vbscript:)"
+        ),
+        "remote or inline-scheme image source in site/",
+    ),
 ]
 
 
@@ -1229,8 +1257,39 @@ def fold_js_expressions(text: str) -> str:
     return "\n".join([folded, *extras]) if extras else folded
 
 
+def _is_safe_grid_track(tok: str) -> bool:
+    """Return True if a CSS grid track sizing token cannot collapse content to zero width."""
+    t = tok.strip().lower()
+    if t in ("auto", "min-content", "max-content"):
+        return True
+    if t.startswith("minmax(") and t.endswith(")"):
+        inner = t[7:-1]
+        depth = 0
+        comma_idx = -1
+        for i, ch in enumerate(inner):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(0, depth - 1)
+            elif ch == "," and depth == 0:
+                comma_idx = i
+                break
+        if comma_idx == -1:
+            return False
+        min_t = inner[:comma_idx].strip()
+        max_t = inner[comma_idx + 1:].strip()
+        min_ok = min_t in ("0", "0px", "auto", "min-content", "max-content") or _is_safe_grid_track(min_t)
+        return min_ok and _is_safe_grid_track(max_t)
+    m = re.match(r"^(\d+(?:\.\d+)?)(fr|px|em|rem|ch|%)$", t)
+    if not m:
+        return False
+    num, unit = float(m.group(1)), m.group(2)
+    min_val = 0.25 if unit in ("fr", "em", "rem", "ch") else 2.0
+    return num >= min_val
+
+
 def count_grid_columns(val: str) -> int | None:
-    """Count static tracks in a CSS grid-template-columns declaration, or -1 if dynamic."""
+    """Count static tracks in a CSS grid-template-columns declaration, or -1 if dynamic or zero-width."""
     v = val.strip().lower()
     if v in ("none", "auto"):
         return None
@@ -1259,10 +1318,10 @@ def count_grid_columns(val: str) -> int | None:
         m = re.match(r"^repeat\(\s*(\d+)\s*,\s*(.+)\)$", tok)
         if m:
             sub = count_grid_columns(m.group(2))
-            if not sub or sub < 1:
+            if int(m.group(1)) < 1 or not sub or sub < 1:
                 return -1
             total += int(m.group(1)) * sub
-        elif tok.startswith("repeat(") or "subgrid" in tok:
+        elif tok.startswith("repeat(") or "subgrid" in tok or not _is_safe_grid_track(tok):
             return -1
         else:
             total += 1
@@ -1275,7 +1334,7 @@ ALLOWED_SITE_CSS_PROPS = {
     "background", "background-color",
     "border", "border-bottom", "border-color", "border-left", "border-radius", "border-right", "border-top",
     "box-sizing", "clip", "color", "content", "counter-increment", "counter-reset", "cursor",
-    "display", "fill", "flex", "flex-direction", "flex-grow", "flex-shrink", "flex-wrap",
+    "display", "fill", "flex", "flex-direction", "flex-wrap",
     "font", "font-family", "font-size", "font-style", "font-weight",
     "gap", "row-gap", "column-gap",
     "grid-column", "grid-column-start", "grid-row", "grid-row-start", "grid-template-columns",
@@ -1306,6 +1365,7 @@ def parse_style_decls(
     raw_decls: dict[str, str] = {}
     raw_imp: dict[str, bool] = {}
     small_box_dims: list[str] = []
+    neg_margins: list[str] = []
 
     def _set_prop(key: str, val: object, is_imp: bool) -> None:
         prev = props.get(key)
@@ -1326,6 +1386,9 @@ def parse_style_decls(
         imp = bool(re.search(r"(?i)!important\s*$", raw_v))
         v = re.sub(r"(?i)\s*!important\s*$", "", raw_v.strip()).strip()
         vl = v.lower()
+        if k.startswith("--") and sel_norm not in {":root", "[data-theme=light]", "[data-theme=dark]"}:
+            invalid.append(f"scoped CSS custom property override ({k})")
+            continue
         if not k.startswith("--") and k not in ALLOWED_SITE_CSS_PROPS:
             invalid.append(f"unmodeled CSS property ({k})")
             continue
@@ -1367,6 +1430,27 @@ def parse_style_decls(
                 _set_prop("clip", "zero", imp)
             else:
                 invalid.append(f"clip:{v[:24]}")
+        elif k == "overflow":
+            if vl in {"visible", "hidden"}:
+                _set_prop("overflow", vl, imp)
+            else:
+                invalid.append(f"overflow:{v[:24]}")
+        elif k == "flex":
+            if vl not in {"none", "1", "auto", "0 0 100%", "0 0 auto", "1 1 auto"}:
+                invalid.append(f"flex:{v[:24]}")
+        elif k == "color":
+            if (
+                vl in {"inherit", "currentcolor", "var(--ink)", "var(--ink2)", "var(--ink3)", "var(--acc)"}
+                or (vl == "var(--bg)" and sel_norm == ".btn")
+            ):
+                _set_prop("fg-color", vl, imp)
+            else:
+                invalid.append(f"color:{v[:24]}")
+        elif k in ("background", "background-color"):
+            if vl in {"none", "var(--bg)", "var(--surf)", "var(--acc2)"} or (vl == "var(--ink)" and sel_norm == ".btn"):
+                _set_prop("bg-color", vl, imp)
+            else:
+                invalid.append(f"{k}:{v[:24]}")
         elif k in ("animation", "transition"):
             if vl != "none":
                 invalid.append(f"{k}:{v[:24]}")
@@ -1445,12 +1529,9 @@ def parse_style_decls(
         elif k in ("margin", "margin-top", "margin-right", "margin-bottom", "margin-left"):
             if CSS_DYNAMIC_FUNC_RE.search(vl):
                 invalid.append(f"{k}:{v[:24]}")
-            else:
-                for m_neg in re.finditer(r"-(\d+(?:\.\d+)?)([a-z%]*)", vl):
-                    if m_neg.group(2) != "px" or float(m_neg.group(1)) > 32.0:
-                        invalid.append(f"{k}:{v[:24]}")
-                        break
-        elif k in ("width", "height", "max-width", "max-height"):
+            elif "-" in vl and not (sel_norm == "nav.links" and k == "margin" and vl == "0 -20px"):
+                neg_margins.append(f"{k}:{v[:24]}")
+        elif k in ("width", "height", "max-width", "max-height", "min-width", "min-height"):
             if CSS_DYNAMIC_FUNC_RE.search(vl):
                 invalid.append(f"{k}:{v[:24]}")
             else:
@@ -1486,13 +1567,23 @@ def parse_style_decls(
     has_zero_clip = props.get("clip", (None, False))[0] == "zero"
     if props.get("position", (None, False))[0] == "absolute" and not has_zero_clip:
         invalid.append("position:absolute without clip:rect(0,0,0,0)")
+    if props.get("overflow", (None, False))[0] == "hidden" and not has_zero_clip:
+        invalid.append("overflow:hidden without clip:rect(0,0,0,0)")
     if small_box_dims and not (has_zero_clip or allow_zero_scrollbar):
         invalid.append(f"sub-2px box dimension hiding ({small_box_dims[0]})")
+    if neg_margins and not (has_zero_clip and neg_margins == ["margin:-1px"]):
+        invalid.append(f"negative margin overlap hiding ({neg_margins[0]})")
     if "color" in raw_decls:
         c_val = raw_decls["color"].strip().lower()
         bg_val = (raw_decls.get("background-color") or raw_decls.get("background") or "").strip().lower()
-        if (bg_val and c_val == bg_val) or (c_val == "var(--bg)" and not bg_val):
+        if (bg_val and c_val == bg_val) or (c_val == "var(--bg)" and bg_val != "var(--ink)"):
             invalid.append("foreground color matching background hiding")
+    theme_bgs = {raw_decls[b].strip().lower() for b in ("--bg", "--surf") if b in raw_decls}
+    if theme_bgs and any(
+        raw_decls.get(fg, "").strip().lower() in theme_bgs
+        for fg in ("--ink", "--ink2", "--ink3", "--acc")
+    ):
+        invalid.append("foreground custom property matching background")
     return props, invalid
 
 
@@ -1611,7 +1702,7 @@ def parse_css_stylesheet(
     idx = start_idx
     layout_keys = {
         "display", "order", "grid-row", "grid-column", "grid-cols",
-        "visibility", "opacity", "position", "clip",
+        "visibility", "opacity", "position", "clip", "overflow", "bg-color",
     }
     i, n = 0, len(clean)
     while i < n:
@@ -1775,7 +1866,9 @@ def _is_hidden_node(node: _DOMNode, st: dict[str, object]) -> bool:
         return True
     if st.get("display") == "none" or st.get("visibility") in ("hidden", "collapse"):
         return True
-    if st.get("clip") == "zero" or st.get("position") == "absolute":
+    if st.get("clip") == "zero" or st.get("position") == "absolute" or st.get("overflow") == "hidden":
+        return True
+    if st.get("fg-color") == "var(--bg)" and st.get("bg-color") != "var(--ink)":
         return True
     if st.get("opacity") in ("0", "0.0", ".0"):
         return True
@@ -2290,6 +2383,20 @@ def check_site_visual_integrity(
             _emit(iss)
         if len(breakpoints) > 32:
             _emit(f"too many CSS @media breakpoints ({len(breakpoints)} > 32) in site/ page")
+        if suffix != ".svg":
+            svg_matches = list(re.finditer(r"(?is)<\s*svg\b.*?</\s*svg\s*>", text))
+            open_svgs = len(re.findall(r"(?i)<\s*svg\b", text))
+            close_svgs = len(re.findall(r"(?i)</\s*svg\s*>", text))
+            if open_svgs != close_svgs or len(svg_matches) != open_svgs:
+                _emit("unapproved inline vector graphic in site/")
+            for sm in svg_matches:
+                blk = sm.group(0)
+                svg_sha = hashlib.sha256(re.sub(r"\s+", " ", blk.strip()).encode("utf-8")).hexdigest()
+                if len(re.findall(r"(?i)<\s*svg\b", blk)) != 1 or svg_sha not in APPROVED_SITE_INLINE_SVGS:
+                    _emit("unapproved inline vector graphic in site/")
+            non_svg_html = re.sub(r"(?is)<\s*svg\b.*?</\s*svg\s*>", "", text)
+            if re.search(r"(?i)<\s*(?:svg|path|polygon|polyline|rect|circle|ellipse|line)\b", non_svg_html):
+                _emit("unapproved inline vector graphic in site/")
         for src, raw_body in parser.script_tags:
             if src is not None:
                 resolved_src = resolve_site_asset_href(rel, src)
@@ -2507,6 +2614,13 @@ def check_leaks(root: Path, report: Report) -> None:
                 report.add(
                     "publish",
                     f"{rel}: unapproved or uninspected raster asset in published site/ tree (section 13)",
+                )
+                if not site_text:
+                    continue
+            elif status == "unapproved_vector":
+                report.add(
+                    "publish",
+                    f"{rel}: unapproved or uninspected vector asset in published site/ tree (section 13)",
                 )
                 if not site_text:
                     continue
