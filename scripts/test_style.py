@@ -461,6 +461,16 @@ class LeakTest(CheckerTestCase):
             "site/percent-config.json",
             '{"config":"%2Fhome%2Foperator%2Fprod%2Fconfig","url":"https%3A%2F%2Factual-private-app.workers.dev"}\n',
         )
+        self.write(
+            "site/dot-pseudo.html",
+            '<style>.dot::before { content: "."; }</style>\n'
+            '<p>actual-private-app<span class="dot">workers</span><span class="dot">dev</span></p>\n',
+        )
+        self.write(
+            "site/prin-abuse.html",
+            '<link rel="stylesheet" href="assets/styles.css">\n'
+            '<ol class="prin" style="display:flex"><span>actual-private-</span><li style="display:inline">workers.dev</li></ol>\n',
+        )
 
         extra_report = self.report()
         check_style.check_leaks(self.root, extra_report)
@@ -488,6 +498,8 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/important-dup.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/percent-config.json" in m and "absolute home path" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/percent-config.json" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/dot-pseudo.html" in m and "CSS content text injection" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/prin-abuse.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
 
     def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
         self.write(

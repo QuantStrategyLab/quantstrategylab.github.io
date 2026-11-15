@@ -1116,7 +1116,7 @@ SIMPLE_COMPOUND_RE = re.compile(
 )
 DISALLOWED_SITE_CSS_RE = [
     (re.compile(r"(?i)@import\b"), "CSS @import external stylesheet"),
-    (re.compile(r"(?i)url\(\s*[\"']?(?:https?:|//)"), "CSS remote resource URL"),
+    (re.compile(r"(?i)\burl\s*\("), "CSS url() resource reference"),
     (re.compile(r"(?i)\bflex-direction\s*:\s*(?:row|column)-reverse\b"), "reverse flex visual ordering"),
     (re.compile(r"(?i)\bflex-wrap\s*:\s*wrap-reverse\b"), "reverse flex-wrap visual ordering"),
     (re.compile(r"(?i)(?<![a-z-])direction\s*:\s*rtl\b"), "RTL CSS text direction"),
@@ -1298,7 +1298,7 @@ CSS_DYNAMIC_FUNC_RE = re.compile(r"(?i)\b(?:var|calc|min|max|clamp)\(")
 
 
 def parse_style_decls(
-    decl_text: str, allow_zero_scrollbar: bool = False
+    decl_text: str, allow_zero_scrollbar: bool = False, prelude_sel: str = ""
 ) -> tuple[dict[str, tuple[object, bool]], list[str]]:
     """Parse CSS declarations relevant to visual layout, ordering, and visibility."""
     props: dict[str, tuple[object, bool]] = {}
@@ -1317,6 +1317,7 @@ def parse_style_decls(
     if "{" in clean or "}" in clean:
         invalid.append("nested CSS block inside declarations")
         return props, invalid
+    sel_norm = re.sub(r"\s+", " ", prelude_sel.strip().lower())
     for part in clean.split(";"):
         if ":" not in part:
             continue
@@ -1375,6 +1376,25 @@ def parse_style_decls(
         elif k == "flex-wrap":
             if vl not in {"nowrap", "wrap"}:
                 invalid.append(f"flex-wrap:{v[:24]}")
+        elif k == "content":
+            if re.match(r"""^(?:none|normal|""|'')$""", vl):
+                pass
+            elif (
+                sel_norm == ".prin li::before"
+                and re.match(r"""^counter\(\s*p\s*,\s*upper-roman\s*\)\s*(?:"\."|'\.')$""", vl)
+            ):
+                pass
+            else:
+                invalid.append(f"content:{v[:24]}")
+        elif k == "counter-reset":
+            if not (sel_norm == ".prin" and vl == "p"):
+                invalid.append(f"counter-reset:{v[:24]}")
+        elif k == "counter-increment":
+            if not (sel_norm == ".prin li::before" and vl == "p"):
+                invalid.append(f"counter-increment:{v[:24]}")
+        elif k == "list-style":
+            if vl != "none":
+                invalid.append(f"list-style:{v[:24]}")
         elif k == "font-size":
             if CSS_DYNAMIC_FUNC_RE.search(vl):
                 invalid.append(f"font-size:{v[:24]}")
@@ -1484,12 +1504,12 @@ def _check_css_safety(clean_css: str) -> list[str]:
         if m:
             issues.append(f"{label} ({m.group(0).strip()[:36]})")
     for m in re.finditer(r"(?i)(?<![a-z-])content\s*:\s*([^;}]+)", clean_css):
-        val = m.group(1).strip()
-        rem = re.sub(r"(?i)\bcounter\([^)]*\)", "", val)
-        rem = re.sub(r"(?i)\b(?:none|normal|open-quote|close-quote)\b", "", rem)
-        rem = re.sub(r"[\"\'\s.]", "", rem)
-        if rem:
-            issues.append(f"CSS content text injection ({val[:36]})")
+        val = re.sub(r"(?i)\s*!important\s*$", "", m.group(1).strip()).strip()
+        if re.match(r"""^(?:none|normal|""|'')$""", val, re.IGNORECASE):
+            continue
+        if re.match(r"""^counter\(\s*p\s*,\s*upper-roman\s*\)\s*(?:"\."|'\.')$""", val, re.IGNORECASE):
+            continue
+        issues.append(f"CSS content text injection ({val[:36]})")
     return issues
 
 
@@ -1651,6 +1671,7 @@ def parse_css_stylesheet(
         props, bad_vals = parse_style_decls(
             body,
             allow_zero_scrollbar=(prelude.strip().lower() == "::-webkit-scrollbar"),
+            prelude_sel=prelude,
         )
         issues.extend(f"non-literal CSS visual-order value ({bv})" for bv in bad_vals)
         fs_val = props.get("font-size", ("", False))[0]
@@ -1775,6 +1796,21 @@ _TABLE_SECTION_ORDER = {
 }
 
 
+def _to_upper_roman(num: int) -> str:
+    """Format a positive integer in uppercase Roman numerals matching CSS counter(p, upper-roman)."""
+    out: list[str] = []
+    rem = max(1, min(num, 3999))
+    for val, sym in (
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    ):
+        while rem >= val:
+            out.append(sym)
+            rem -= val
+    return "".join(out)
+
+
 def serialize_visual_tree(
     root_node: _DOMNode,
     rules: list | tuple,
@@ -1782,10 +1818,12 @@ def serialize_visual_tree(
     respect_order: bool,
     skip_hidden: bool,
     i18n_map: dict[str, str] | None = None,
+    include_pseudo: bool = False,
 ) -> tuple[str, str]:
     """Serialize DOM text in computed visual order (flex order, grid tracks, table sections)."""
     fused: list[str] = []
     compact: list[str] = []
+    prin_counter = [0]
 
     def expand_children(container: _DOMNode) -> list[tuple[str, object, dict[str, object]]]:
         items: list[tuple[str, object, dict[str, object]]] = []
@@ -1889,6 +1927,19 @@ def serialize_visual_tree(
         return [(m[1], m[2], m[3]) for m in meaningful_items]  # type: ignore[misc]
 
     def walk(node: _DOMNode) -> None:
+        if include_pseudo and node.tag != "__root__":
+            if "prin" in node.classes:
+                prin_counter[0] = 0
+            elif node.tag == "li":
+                anc = node.parent
+                while anc is not None and anc.tag != "__root__":
+                    if "prin" in anc.classes:
+                        prin_counter[0] += 1
+                        pfx = f"{_to_upper_roman(prin_counter[0])}."
+                        fused.append(pfx)
+                        compact.append(pfx)
+                        break
+                    anc = anc.parent
         if i18n_map and node.tag != "__root__":
             k_txt = node.attrs.get("data-i18n")
             k_htm = node.attrs.get("data-i18n-html")
@@ -2151,29 +2202,36 @@ def normalize_html_text(
     has_i18n = "data-i18n" in text and bool(i18n_maps)
     for vw in active_viewports:
         for skip_hidden in (True, False):
-            vf, vc = serialize_visual_tree(
-                parser.dom_root, all_rules, viewport_w=vw, respect_order=True, skip_hidden=skip_hidden
-            )
-            for v in (vf, vc):
-                if v not in seen_rendered:
-                    seen_rendered.add(v)
-                    rendered_views.append(v)
-            if has_i18n:
-                for imap in i18n_maps:
-                    if not imap:
-                        continue
-                    ivf, ivc = serialize_visual_tree(
-                        parser.dom_root,
-                        all_rules,
-                        viewport_w=vw,
-                        respect_order=True,
-                        skip_hidden=skip_hidden,
-                        i18n_map=imap,
-                    )
-                    for v in (ivf, ivc):
-                        if v not in seen_rendered:
-                            seen_rendered.add(v)
-                            rendered_views.append(v)
+            for inc_pseudo in (False, True):
+                vf, vc = serialize_visual_tree(
+                    parser.dom_root,
+                    all_rules,
+                    viewport_w=vw,
+                    respect_order=True,
+                    skip_hidden=skip_hidden,
+                    include_pseudo=inc_pseudo,
+                )
+                for v in (vf, vc):
+                    if v not in seen_rendered:
+                        seen_rendered.add(v)
+                        rendered_views.append(v)
+                if has_i18n:
+                    for imap in i18n_maps:
+                        if not imap:
+                            continue
+                        ivf, ivc = serialize_visual_tree(
+                            parser.dom_root,
+                            all_rules,
+                            viewport_w=vw,
+                            respect_order=True,
+                            skip_hidden=skip_hidden,
+                            i18n_map=imap,
+                            include_pseudo=inc_pseudo,
+                        )
+                        for v in (ivf, ivc):
+                            if v not in seen_rendered:
+                                seen_rendered.add(v)
+                                rendered_views.append(v)
 
     combined = "\n".join([
         "".join(parser.inline_parts),
