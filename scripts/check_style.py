@@ -1133,6 +1133,14 @@ HTML_VOID_TAGS = {
     "area", "base", "br", "col", "embed", "hr", "img", "input",
     "link", "meta", "param", "source", "track", "wbr",
 }
+ALLOWED_SITE_HTML_TAGS = {
+    "a", "article", "aside", "b", "blockquote", "body", "br", "button", "caption",
+    "circle", "code", "dd", "div", "dl", "dt", "em", "footer", "h1", "h2", "h3",
+    "h4", "h5", "h6", "head", "header", "hr", "html", "i", "img", "li", "link",
+    "main", "meta", "nav", "ol", "p", "path", "pre", "rect", "s", "script",
+    "section", "small", "span", "strong", "style", "sub", "sup", "svg",
+    "table", "tbody", "td", "tfoot", "th", "thead", "time", "title", "tr", "u", "ul", "wbr",
+}
 SIMPLE_COMPOUND_RE = re.compile(
     r"^(?:[a-zA-Z][a-zA-Z0-9-]*)?(?:(?:#[a-zA-Z0-9_-]+)|(?:\.[a-zA-Z0-9_-]+)|(?:\[[a-zA-Z0-9_-]+(?:=[a-zA-Z0-9_\"'-]+)?\]))*$"
 )
@@ -1175,7 +1183,7 @@ DISALLOWED_SITE_HTML_RE = [
         ),
         "SVG animation, reference, or masking element in site/",
     ),
-    (re.compile(r"(?i)<\s*(?:script|style)\b[^>]*/>"), "self-closing script or style tag in site/"),
+    (re.compile(r"(?i)<\s*(?:script|style|title)\b[^>]*/>"), "self-closing script or style tag in site/"),
     (
         re.compile(
             r"(?i)<\s*(?:img|source)\b[^>]*\b(?:src|srcset)\s*=\s*[\"']?\s*(?:https?:|//|data:|javascript:|vbscript:)"
@@ -1482,20 +1490,20 @@ def parse_style_decls(
         elif k == "font-size":
             if CSS_DYNAMIC_FUNC_RE.search(vl):
                 invalid.append(f"font-size:{v[:24]}")
+            elif vl == "inherit":
+                pass
             else:
                 m_fs = re.match(r"^([+-]?\d+(?:\.\d+)?)([a-z%]+)?$", vl)
                 if m_fs:
                     fs_num = float(m_fs.group(1))
                     fs_unit = m_fs.group(2) or "px"
                     min_fs = 0.25 if fs_unit in ("em", "rem", "ch") else 4.0
-                    if fs_num == 0.0:
-                        _set_prop("font-size", "0", imp)
-                    elif fs_num < 0.0 or fs_num < min_fs:
+                    if fs_num < min_fs:
                         invalid.append(f"font-size:{v[:24]}")
                     else:
                         _set_prop("font-size", vl, imp)
                 else:
-                    _set_prop("font-size", vl, imp)
+                    invalid.append(f"font-size:{v[:24]}")
         elif k == "line-height":
             if CSS_DYNAMIC_FUNC_RE.search(vl):
                 invalid.append(f"line-height:{v[:24]}")
@@ -1770,8 +1778,24 @@ def parse_css_stylesheet(
         has_layout_prop = has_zero_font or any(k in props for k in layout_keys)
         if has_layout_prop and unresolvable_cond:
             issues.append(f"non-pixel conditional layout rule ({prelude[:36]})")
-        for sel in prelude.split(","):
-            sel = sel.strip()
+        sel_parts: list[str] = []
+        s_cur: list[str] = []
+        s_depth = 0
+        for ch in prelude:
+            if ch in "([":
+                s_depth += 1
+                s_cur.append(ch)
+            elif ch in ")]":
+                s_depth = max(0, s_depth - 1)
+                s_cur.append(ch)
+            elif ch == "," and s_depth == 0:
+                sel_parts.append("".join(s_cur).strip())
+                s_cur = []
+            else:
+                s_cur.append(ch)
+        if s_cur:
+            sel_parts.append("".join(s_cur).strip())
+        for sel in sel_parts:
             if not sel:
                 continue
             chain, spec = parse_simple_selector(sel)
@@ -1858,22 +1882,49 @@ def compute_node_style(
     return {k: v[1] for k, v in resolved.items()}
 
 
-def _is_hidden_node(node: _DOMNode, st: dict[str, object]) -> bool:
-    if (
-        node.tag in ("template", "script", "style", "noscript", "svg", "defs", "symbol", "desc", "metadata")
-        or "hidden" in node.attrs
-    ):
+def _omits_layout_box(node: _DOMNode, st: dict[str, object]) -> bool:
+    if node.tag in ("template", "script", "style", "noscript", "svg", "defs", "symbol", "desc", "metadata"):
         return True
-    if st.get("display") == "none" or st.get("visibility") in ("hidden", "collapse"):
+    if st.get("display") == "none":
         return True
-    if st.get("clip") == "zero" or st.get("position") == "absolute" or st.get("overflow") == "hidden":
+    if "hidden" in node.attrs and st.get("display") in (None, "none"):
         return True
-    if st.get("fg-color") == "var(--bg)" and st.get("bg-color") != "var(--ink)":
+    if st.get("clip") == "zero" or st.get("position") == "absolute":
         return True
-    if st.get("opacity") in ("0", "0.0", ".0"):
+    return False
+
+
+def _suppresses_subtree_paint(st: dict[str, object]) -> bool:
+    if st.get("opacity") in ("0", "0.0", ".0") or st.get("overflow") == "hidden":
         return True
+    return False
+
+
+def _next_inherited_state(
+    st: dict[str, object],
+    inh: tuple[str, bool, str, str],
+) -> tuple[str, bool, str, str]:
+    inh_vis, inh_zero_fs, inh_fg, inh_bg = inh
+    vis = str(st["visibility"]) if st.get("visibility") in ("visible", "hidden", "collapse") else inh_vis
     fs = st.get("font-size")
     if isinstance(fs, str) and re.match(r"^0(?:\.0+)?(?:[a-z%]+)?$", fs):
+        zero_fs = True
+    elif isinstance(fs, str) and fs:
+        zero_fs = True if (inh_zero_fs and bool(re.search(r"(?:%|(?<!r)em|ex|ch)$", fs))) else False
+    else:
+        zero_fs = inh_zero_fs
+    fg = str(st["fg-color"]) if st.get("fg-color") not in (None, "inherit", "currentcolor") else inh_fg
+    bg = str(st["bg-color"]) if st.get("bg-color") not in (None, "none") else inh_bg
+    return (vis, zero_fs, fg, bg)
+
+
+def _is_text_hidden(inh: tuple[str, bool, str, str]) -> bool:
+    vis, zero_fs, fg, bg = inh
+    if vis in ("hidden", "collapse") or zero_fs:
+        return True
+    if fg == "var(--bg)" and bg != "var(--ink)":
+        return True
+    if fg and bg and fg == bg:
         return True
     return False
 
@@ -1917,27 +1968,33 @@ def serialize_visual_tree(
     fused: list[str] = []
     compact: list[str] = []
     prin_counter = [0]
+    root_inh: tuple[str, bool, str, str] = ("visible", False, "", "")
 
-    def expand_children(container: _DOMNode) -> list[tuple[str, object, dict[str, object]]]:
-        items: list[tuple[str, object, dict[str, object]]] = []
+    def expand_children(
+        container: _DOMNode, inh: tuple[str, bool, str, str]
+    ) -> list[tuple[str, object, dict[str, object], tuple[str, bool, str, str]]]:
+        items: list[tuple[str, object, dict[str, object], tuple[str, bool, str, str]]] = []
         for ch in container.children:
             if isinstance(ch, str):
-                if ch:
-                    items.append(("text", ch, {}))
+                if ch and not (skip_hidden and _is_text_hidden(inh)):
+                    items.append(("text", ch, {}, inh))
             else:
                 st = compute_node_style(ch, rules, viewport_w)
-                if skip_hidden and _is_hidden_node(ch, st):
+                if skip_hidden and _omits_layout_box(ch, st):
                     continue
+                ch_inh = _next_inherited_state(st, inh)
                 if respect_order and st.get("display") == "contents":
-                    items.extend(expand_children(ch))
+                    if skip_hidden and _suppresses_subtree_paint(st):
+                        continue
+                    items.extend(expand_children(ch, ch_inh))
                 else:
-                    items.append(("node", ch, st))
+                    items.append(("node", ch, st, ch_inh))
         if not respect_order:
             return items
         if container.tag == "table":
             meaningful = [
-                (idx, kind, obj, st)
-                for idx, (kind, obj, st) in enumerate(items)
+                (idx, kind, obj, st, item_inh)
+                for idx, (kind, obj, st, item_inh) in enumerate(items)
                 if not (kind == "text" and isinstance(obj, str) and not obj.strip())
             ]
             meaningful.sort(
@@ -1946,7 +2003,7 @@ def serialize_visual_tree(
                     x[0],
                 )
             )
-            return [(k, o, s) for _, k, o, s in meaningful]
+            return [(k, o, s, ii) for _, k, o, s, ii in meaningful]
 
         parent_st = compute_node_style(container, rules, viewport_w) if container.tag != "__root__" else {}
         disp = str(parent_st.get("display", "")).lower()
@@ -1956,7 +2013,7 @@ def serialize_visual_tree(
             return items
 
         meaningful_items: list[list[object]] = []
-        for idx, (kind, obj, st) in enumerate(items):
+        for idx, (kind, obj, st, item_inh) in enumerate(items):
             if kind == "text" and isinstance(obj, str) and not obj.strip():
                 continue
             raw_ord = st.get("order", 0)
@@ -1965,11 +2022,11 @@ def serialize_visual_tree(
             gr = raw_gr if isinstance(raw_gr, int) else None
             raw_gc = st.get("grid-column")
             gc = raw_gc if isinstance(raw_gc, int) else None
-            meaningful_items.append([idx, kind, obj, st, ord_val, gr, gc])
+            meaningful_items.append([idx, kind, obj, st, ord_val, gr, gc, item_inh])
 
         if is_flex:
             meaningful_items.sort(key=lambda x: (int(x[4]), int(x[0])))  # type: ignore[arg-type]
-            return [(m[1], m[2], m[3]) for m in meaningful_items]  # type: ignore[misc]
+            return [(m[1], m[2], m[3], m[7]) for m in meaningful_items]  # type: ignore[misc]
 
         explicit_cols = [m[6] for m in meaningful_items if isinstance(m[6], int)]
         parent_cols = parent_st.get("grid-cols")
@@ -2017,9 +2074,11 @@ def serialize_visual_tree(
                         cur_r += 1
                         cur_c = 1
         meaningful_items.sort(key=lambda x: (int(x[5]), int(x[6]), int(x[4]), int(x[0])))  # type: ignore[arg-type]
-        return [(m[1], m[2], m[3]) for m in meaningful_items]  # type: ignore[misc]
+        return [(m[1], m[2], m[3], m[7]) for m in meaningful_items]  # type: ignore[misc]
 
-    def walk(node: _DOMNode) -> None:
+    def walk(node: _DOMNode, st: dict[str, object], inh: tuple[str, bool, str, str]) -> None:
+        if skip_hidden and node.tag != "__root__" and _suppresses_subtree_paint(st):
+            return
         if include_pseudo and node.tag != "__root__":
             if "prin" in node.classes:
                 prin_counter[0] = 0
@@ -2028,43 +2087,47 @@ def serialize_visual_tree(
                 while anc is not None and anc.tag != "__root__":
                     if "prin" in anc.classes:
                         prin_counter[0] += 1
-                        pfx = f"{_to_upper_roman(prin_counter[0])}."
-                        fused.append(pfx)
-                        compact.append(pfx)
+                        if not (skip_hidden and _is_text_hidden(inh)):
+                            pfx = f"{_to_upper_roman(prin_counter[0])}."
+                            fused.append(pfx)
+                            compact.append(pfx)
                         break
                     anc = anc.parent
         if i18n_map and node.tag != "__root__":
             k_txt = node.attrs.get("data-i18n")
             k_htm = node.attrs.get("data-i18n-html")
             if k_txt and k_txt in i18n_map:
-                val = i18n_map[k_txt]
-                fused.append(val)
-                if val.strip():
-                    compact.append(val.strip())
+                if not (skip_hidden and _is_text_hidden(inh)):
+                    val = i18n_map[k_txt]
+                    fused.append(val)
+                    if val.strip():
+                        compact.append(val.strip())
                 return
             if k_htm and k_htm in i18n_map:
-                val = re.sub(r"<[^>]+>", "", i18n_map[k_htm])
-                fused.append(val)
-                if val.strip():
-                    compact.append(val.strip())
+                if not (skip_hidden and _is_text_hidden(inh)):
+                    val = re.sub(r"<[^>]+>", "", i18n_map[k_htm])
+                    fused.append(val)
+                    if val.strip():
+                        compact.append(val.strip())
                 return
-        for kind, obj, _ in expand_children(node):
+        for kind, obj, ch_st, ch_inh in expand_children(node, inh):
             if kind == "text" and isinstance(obj, str):
                 fused.append(obj)
                 if obj.strip():
                     compact.append(obj.strip())
             elif isinstance(obj, _DOMNode):
-                walk(obj)
+                walk(obj, ch_st, ch_inh)
 
-    walk(root_node)
+    walk(root_node, {}, root_inh)
     return "".join(fused), "".join(compact)
 
 
 class _RenderedHTMLNormalizer(HTMLParser):
-    def __init__(self, depth: int = 0, xml_mode: bool = False) -> None:
+    def __init__(self, depth: int = 0, xml_mode: bool = False, page_rel: str = "site/index.html") -> None:
         super().__init__(convert_charrefs=True)
         self.depth = depth
         self.xml_mode = xml_mode
+        self.page_rel = page_rel
         self.inline_parts: list[str] = []
         self.fused_parts: list[str] = []
         self.compact_parts: list[str] = []
@@ -2083,14 +2146,26 @@ class _RenderedHTMLNormalizer(HTMLParser):
         self._raw_media: str = ""
         self._raw_src: str | None = None
 
-    @staticmethod
-    def _has_inline_display(attrs: list[tuple[str, str | None]]) -> bool:
+    def _collect_attrs(self, tag: str, attrs: list[tuple[str, str | None]]) -> dict[str, str]:
+        ad: dict[str, str] = {}
+        if tag not in ALLOWED_SITE_HTML_TAGS:
+            self.html_issues.append(f"unmodeled HTML element in site/ (<{tag}>)")
         for k, v in attrs:
-            if k.lower() == "style" and v and INLINE_DISPLAY_RE.search(v):
-                return True
-        return False
+            kl = k.lower()
+            if kl in ad:
+                self.html_issues.append(f"duplicate HTML attribute in site/ ({kl})")
+                continue
+            ad[kl] = v if v is not None else ""
+        return ad
 
-    def _handle_attrs(self, attrs: list[tuple[str, str | None]]) -> None:
+    @staticmethod
+    def _has_inline_display(ad: dict[str, str]) -> bool:
+        style_v = ad.get("style", "")
+        return bool(style_v and INLINE_DISPLAY_RE.search(style_v))
+
+    def _handle_attrs(
+        self, tag: str, attrs: list[tuple[str, str | None]], ad: dict[str, str]
+    ) -> None:
         for k, v in attrs:
             kl = k.lower()
             if kl in ("display", "visibility", "opacity", "clip", "clip-path", "transform", "filter", "mask"):
@@ -2100,8 +2175,12 @@ class _RenderedHTMLNormalizer(HTMLParser):
             if not v:
                 continue
             compact_val = re.sub(r"[\x00-\x20]+", "", v)
-            if re.match(r"^(?:javascript|vbscript):", compact_val, re.IGNORECASE):
-                self.html_issues.append("javascript: or vbscript: URI attribute in site/")
+            unq_compact = re.sub(r"[\x00-\x20]+", "", urllib.parse.unquote(compact_val))
+            for chk_val in (compact_val, unq_compact):
+                if re.match(r"^(?:javascript|vbscript):", chk_val, re.IGNORECASE):
+                    self.html_issues.append("javascript: or vbscript: URI attribute in site/")
+                if re.match(r"^data:", chk_val, re.IGNORECASE):
+                    self.html_issues.append("embedded data URI asset requires direct file scan")
             self.attr_lines.append(f"{k}={v}")
             if "%" in v:
                 self.attr_lines.append(f"{k}={urllib.parse.unquote(v)}")
@@ -2111,20 +2190,35 @@ class _RenderedHTMLNormalizer(HTMLParser):
                 _, bad_vals = parse_style_decls(clean_s)
                 self.inline_css_issues.extend(f"non-literal CSS visual-order value ({bv})" for bv in bad_vals)
             if kl == "srcdoc" and self.depth < 3:
-                self.subtrees.append(normalize_html_text(v, self.depth + 1))
+                self.subtrees.append(normalize_html_text(v, self.depth + 1, page_rel=self.page_rel))
+        if tag == "link" and "href" in ad:
+            if resolve_site_asset_href(self.page_rel, ad["href"]) is None:
+                self.html_issues.append(f"remote or inline-scheme stylesheet or link in site/ ({ad['href'][:36]})")
+        elif tag == "script" and "src" in ad:
+            if resolve_site_asset_href(self.page_rel, ad["src"]) is None:
+                self.html_issues.append(f"remote or inline-scheme stylesheet or script in site/ ({ad['src'][:36]})")
+        elif tag == "img":
+            if "src" in ad and resolve_site_asset_href(self.page_rel, ad["src"]) is None:
+                self.html_issues.append(f"remote or inline-scheme image source in site/ ({ad['src'][:36]})")
+            if "srcset" in ad:
+                for cand in ad["srcset"].split(","):
+                    parts = cand.strip().split()
+                    if not parts or resolve_site_asset_href(self.page_rel, parts[0]) is None:
+                        self.html_issues.append("remote or inline-scheme image source in site/ (srcset)")
+                        break
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
-        ad = {k.lower(): (v or "") for k, v in attrs}
+        ad = self._collect_attrs(t, attrs)
         node = _DOMNode(t, ad, parent=self._dom_stack[-1])
         self._dom_stack[-1].children.append(node)
         if t not in HTML_VOID_TAGS:
             self._dom_stack.append(node)
-        is_block = (t in HTML_BLOCK_TAGS) and not self._has_inline_display(attrs)
+        is_block = (t in HTML_BLOCK_TAGS) and not self._has_inline_display(ad)
         self._tag_stack.append((t, is_block))
         if is_block:
             self.inline_parts.append("\n")
-        self._handle_attrs(attrs)
+        self._handle_attrs(t, attrs, ad)
         if t == "link":
             rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
             if "stylesheet" in rel_tokens:
@@ -2137,21 +2231,25 @@ class _RenderedHTMLNormalizer(HTMLParser):
             self._raw_tag = t
             self._raw_chunks = []
             self._raw_src = ad["src"] if "src" in ad else None
+        elif t == "title":
+            self.set_cdata_mode("title")
+            self._raw_tag = t
+            self._raw_chunks = []
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
         in_svg = self.xml_mode or any(st_tag == "svg" for st_tag, _ in self._tag_stack)
-        if t in ("script", "style") or (not in_svg and t not in HTML_VOID_TAGS):
-            if t in ("script", "style"):
+        if t in ("script", "style", "title") or (not in_svg and t not in HTML_VOID_TAGS):
+            if t in ("script", "style", "title"):
                 self.set_cdata_mode(t)
             self.handle_starttag(tag, attrs)
             return
-        ad = {k.lower(): (v or "") for k, v in attrs}
+        ad = self._collect_attrs(t, attrs)
         node = _DOMNode(t, ad, parent=self._dom_stack[-1])
         self._dom_stack[-1].children.append(node)
-        if (t in HTML_BLOCK_TAGS) and not self._has_inline_display(attrs):
+        if (t in HTML_BLOCK_TAGS) and not self._has_inline_display(ad):
             self.inline_parts.append("\n")
-        self._handle_attrs(attrs)
+        self._handle_attrs(t, attrs, ad)
         if t == "link":
             rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
             if "stylesheet" in rel_tokens:
@@ -2167,13 +2265,25 @@ class _RenderedHTMLNormalizer(HTMLParser):
             dec = fold_js_expressions(raw_body)
             self.subtrees.append(dec)
             if ("<" in dec or "&" in dec) and self.depth < 3:
-                self.subtrees.append(normalize_html_text(dec, self.depth + 1))
+                self.subtrees.append(normalize_html_text(dec, self.depth + 1, page_rel=self.page_rel))
         elif tag_name == "style":
             self.stylesheet_entries.append(("inline", raw_body, self._raw_media))
             self._raw_media = ""
             self.subtrees.append(unescape_css_literals(raw_body))
+        elif tag_name == "title":
+            if "<" in raw_body:
+                self.html_issues.append("markup inside HTML <title> in site/")
+            unesc = html.unescape(raw_body)
+            self.inline_parts.append(unesc)
+            self.fused_parts.append(unesc)
+            if unesc.strip():
+                self.compact_parts.append(unesc.strip())
+            self._dom_stack[-1].children.append(unesc)
         self._raw_tag = None
         self._raw_chunks = []
+
+    def handle_pi(self, data: str) -> None:
+        self.html_issues.append("HTML processing instruction in site/")
 
     def handle_endtag(self, tag: str) -> None:
         t = tag.lower()
@@ -2233,6 +2343,9 @@ def _collect_page_stylesheet_rules(
             if resolved is None:
                 issues.append(f"external or escaping stylesheet link ({content[:36]})")
                 continue
+            if not resolved.lower().endswith(".css"):
+                issues.append(f"non-CSS stylesheet link ({content[:36]})")
+                continue
             if css_by_rel is not None:
                 if resolved not in css_by_rel:
                     issues.append(f"missing local stylesheet link ({content[:36]})")
@@ -2245,10 +2358,7 @@ def _collect_page_stylesheet_rules(
                 css_src, media_iv=base_iv, unresolvable_cond=m_unres, start_idx=idx_base
             )
             rules.extend(p_rules)
-            if kind == "inline":
-                issues.extend(p_issues)
-            elif m_unres:
-                issues.extend(iss for iss in p_issues if iss.startswith("non-pixel conditional"))
+            issues.extend(p_issues)
             for _, _, _, _, (lo, hi) in p_rules:
                 if 0.0 < lo < float("inf"):
                     breakpoints.add(lo)
@@ -2268,6 +2378,7 @@ def normalize_html_text(
     parser = _RenderedHTMLNormalizer(
         depth=depth,
         xml_mode=Path(page_rel).suffix.lower() in (".svg", ".xml", ".xhtml"),
+        page_rel=page_rel,
     )
     parser.feed(text)
     parser.close()
@@ -2367,7 +2478,7 @@ def check_site_visual_integrity(
             m = rx.search(text)
             if m:
                 _emit(f"{label}: {m.group(0).strip()[:36]}")
-        parser = _RenderedHTMLNormalizer(xml_mode=suffix in (".svg", ".xml", ".xhtml"))
+        parser = _RenderedHTMLNormalizer(xml_mode=suffix in (".svg", ".xml", ".xhtml"), page_rel=rel)
         parser.feed(text)
         parser.close()
         if parser._raw_tag is not None:

@@ -498,6 +498,19 @@ class LeakTest(CheckerTestCase):
             "site/inline-vector.html",
             '<p>x</p><svg viewBox="0 0 10 10"><path d="M0 0h5"/></svg>\n',
         )
+        self.write(
+            "site/vis-override.html",
+            '<div style="visibility:hidden">SAFE<span style="visibility:visible">'
+            'actual-private-app.work<span style="display:none">SAFE</span>ers.dev</span></div>\n',
+        )
+        self.write(
+            "site/dup-script-src.html",
+            '<script src="https&#58;//evil.invalid/p.js" src="assets/app.js"></script>\n',
+        )
+        self.write(
+            "site/unmodeled-tag.html",
+            "<p>actual-private-app.work<noframes>SAFE</noframes>ers.dev</p>\n",
+        )
 
         extra_report = self.report()
         check_style.check_leaks(self.root, extra_report)
@@ -533,6 +546,11 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/grid-zero-track.html" in m and "grid-template-columns:" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/outlined-leak.svg" in m and "unapproved or uninspected vector asset" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/inline-vector.html" in m and "unapproved inline vector graphic" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/vis-override.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/dup-script-src.html" in m and "duplicate HTML attribute in site/ (src)" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/dup-script-src.html" in m and "remote or inline-scheme stylesheet or script in site/" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/dup-script-src.html" in m and "unapproved executable script src in site/" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/unmodeled-tag.html" in m and "unmodeled HTML element in site/ (<noframes>)" in m for m in extra_msgs), extra_msgs)
 
     def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
         self.write(
