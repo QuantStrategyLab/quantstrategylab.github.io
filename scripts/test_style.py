@@ -511,6 +511,21 @@ class LeakTest(CheckerTestCase):
             "site/unmodeled-tag.html",
             "<p>actual-private-app.work<noframes>SAFE</noframes>ers.dev</p>\n",
         )
+        self.write(
+            "site/ineffective-clip.html",
+            '<div style="clip:rect(0,0,0,0)">actual-private-app.work<span style="display:none">SAFE</span>ers.dev</div>\n',
+        )
+        self.write(
+            "site/dark-theme-leak.html",
+            '<html data-theme="light"><head><style>html[data-theme=dark] .h{display:none}</style></head>'
+            '<body>actual-private-app.work<span class="h">SAFE</span>ers.dev'
+            '<script src="assets/app.js"></script></body></html>\n',
+        )
+        self.write(
+            "site/wrapped-col-flex.html",
+            '<div style="display:flex;flex-direction:column;flex-wrap:wrap;height:40px">'
+            "<span>actual-private-app.</span><span>SAFE</span><span>workers.dev</span><span>SAFE</span></div>\n",
+        )
 
         extra_report = self.report()
         check_style.check_leaks(self.root, extra_report)
@@ -551,6 +566,10 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/dup-script-src.html" in m and "remote or inline-scheme stylesheet or script in site/" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/dup-script-src.html" in m and "unapproved executable script src in site/" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/unmodeled-tag.html" in m and "unmodeled HTML element in site/ (<noframes>)" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/ineffective-clip.html" in m and "clip:rect(0,0,0,0) without position:absolute" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/ineffective-clip.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/dark-theme-leak.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/wrapped-col-flex.html" in m and "wrapped column flex visual reordering" in m for m in extra_msgs), extra_msgs)
 
     def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
         self.write(

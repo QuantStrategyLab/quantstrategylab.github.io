@@ -1405,10 +1405,12 @@ def parse_style_decls(
         if imp or not raw_imp.get(k, False):
             raw_decls[k] = v
             raw_imp[k] = imp
-        if k == "display":
+        if k.startswith("--"):
+            _set_prop(k, vl, imp)
+        elif k == "display":
             if vl in {
                 "none", "contents", "block", "inline", "inline-block", "flex",
-                "inline-flex", "grid", "inline-grid", "list-item", "table", "table-row", "table-cell",
+                "inline-flex", "grid", "inline-grid", "list-item",
             }:
                 _set_prop("display", vl, imp)
             else:
@@ -1429,9 +1431,7 @@ def parse_style_decls(
             else:
                 invalid.append(f"position:{v[:24]}")
         elif k == "clip":
-            if vl == "auto":
-                _set_prop("clip", "auto", imp)
-            elif re.match(
+            if re.match(
                 r"^rect\(\s*0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?\s*\)$",
                 vl,
             ):
@@ -1446,6 +1446,8 @@ def parse_style_decls(
         elif k == "flex":
             if vl not in {"none", "1", "auto", "0 0 100%", "0 0 auto", "1 1 auto"}:
                 invalid.append(f"flex:{v[:24]}")
+            if re.search(r"(?:^|\s)0(?:\.0+)?(?:px|%|em|rem|ch)?$", vl):
+                _set_prop("zero-box", True, imp)
         elif k == "color":
             if (
                 vl in {"inherit", "currentcolor", "var(--ink)", "var(--ink2)", "var(--ink3)", "var(--acc)"}
@@ -1463,11 +1465,18 @@ def parse_style_decls(
             if vl != "none":
                 invalid.append(f"{k}:{v[:24]}")
         elif k == "flex-direction":
-            if vl not in {"row", "column"}:
+            if vl in {"row", "column"}:
+                _set_prop("flex-direction", vl, imp)
+            else:
                 invalid.append(f"flex-direction:{v[:24]}")
         elif k == "flex-wrap":
-            if vl not in {"nowrap", "wrap"}:
+            if vl in {"nowrap", "wrap"}:
+                _set_prop("flex-wrap", vl, imp)
+            else:
                 invalid.append(f"flex-wrap:{v[:24]}")
+        elif k in ("gap", "row-gap", "column-gap"):
+            if CSS_DYNAMIC_FUNC_RE.search(vl) or "-" in vl:
+                invalid.append(f"{k}:{v[:24]}")
         elif k == "content":
             if re.match(r"""^(?:none|normal|""|'')$""", vl):
                 pass
@@ -1550,6 +1559,8 @@ def parse_style_decls(
                     min_dim = 0.25 if dim_unit in ("em", "rem", "ch") else 2.0
                     if dim_num < min_dim:
                         small_box_dims.append(f"{k}:{v[:24]}")
+                        if k in ("width", "height", "max-width", "max-height"):
+                            _set_prop("zero-box", True, imp)
         elif k == "order":
             m = re.match(r"^[+-]?\d+$", v)
             if m:
@@ -1562,7 +1573,7 @@ def parse_style_decls(
                 _set_prop(prop_key, None, imp)
             else:
                 m = re.match(r"^(\d+)(?:\s*/\s*(\d+))?$", v)
-                if m and int(m.group(1)) >= 1 and (m.group(2) is None or int(m.group(2)) > int(m.group(1))):
+                if m and int(m.group(1)) >= 1 and (m.group(2) is None or int(m.group(2)) == int(m.group(1)) + 1):
                     _set_prop(prop_key, int(m.group(1)), imp)
                 else:
                     invalid.append(f"{k}:{v[:24]}")
@@ -1573,13 +1584,22 @@ def parse_style_decls(
             elif cols is not None:
                 _set_prop("grid-cols", cols, imp)
     has_zero_clip = props.get("clip", (None, False))[0] == "zero"
-    if props.get("position", (None, False))[0] == "absolute" and not has_zero_clip:
+    has_abs_pos = props.get("position", (None, False))[0] == "absolute"
+    has_sr_only_clip = has_zero_clip and has_abs_pos
+    if has_zero_clip and not has_abs_pos:
+        invalid.append("clip:rect(0,0,0,0) without position:absolute")
+    if has_abs_pos and not has_zero_clip:
         invalid.append("position:absolute without clip:rect(0,0,0,0)")
-    if props.get("overflow", (None, False))[0] == "hidden" and not has_zero_clip:
+    if props.get("overflow", (None, False))[0] == "hidden" and not has_sr_only_clip:
         invalid.append("overflow:hidden without clip:rect(0,0,0,0)")
-    if small_box_dims and not (has_zero_clip or allow_zero_scrollbar):
+    if (
+        props.get("flex-direction", (None, False))[0] == "column"
+        and props.get("flex-wrap", (None, False))[0] == "wrap"
+    ):
+        invalid.append("wrapped column flex visual reordering")
+    if small_box_dims and not (has_sr_only_clip or allow_zero_scrollbar):
         invalid.append(f"sub-2px box dimension hiding ({small_box_dims[0]})")
-    if neg_margins and not (has_zero_clip and neg_margins == ["margin:-1px"]):
+    if neg_margins and not (has_sr_only_clip and neg_margins == ["margin:-1px"]):
         invalid.append(f"negative margin overlap hiding ({neg_margins[0]})")
     if "color" in raw_decls:
         c_val = raw_decls["color"].strip().lower()
@@ -1625,6 +1645,11 @@ def parse_simple_selector(sel: str):
         if tok.isspace():
             if comb is None:
                 comb = " "
+            continue
+        if tok.lower() == ":root":
+            spec_cls += 1
+            chain.append((comb, "html", [], [], []))
+            comb = None
             continue
         if not SIMPLE_COMPOUND_RE.match(tok) or tok == "":
             return None, (0, 0, 0)
@@ -1711,6 +1736,7 @@ def parse_css_stylesheet(
     layout_keys = {
         "display", "order", "grid-row", "grid-column", "grid-cols",
         "visibility", "opacity", "position", "clip", "overflow", "bg-color",
+        "flex-direction", "flex-wrap",
     }
     i, n = 0, len(clean)
     while i < n:
@@ -1889,13 +1915,15 @@ def _omits_layout_box(node: _DOMNode, st: dict[str, object]) -> bool:
         return True
     if "hidden" in node.attrs and st.get("display") in (None, "none"):
         return True
-    if st.get("clip") == "zero" or st.get("position") == "absolute":
+    if st.get("position") == "absolute" and st.get("clip") == "zero":
         return True
     return False
 
 
 def _suppresses_subtree_paint(st: dict[str, object]) -> bool:
-    if st.get("opacity") in ("0", "0.0", ".0") or st.get("overflow") == "hidden":
+    if st.get("opacity") in ("0", "0.0", ".0"):
+        return True
+    if st.get("overflow") == "hidden" and bool(st.get("zero-box")):
         return True
     return False
 
@@ -2096,14 +2124,14 @@ def serialize_visual_tree(
         if i18n_map and node.tag != "__root__":
             k_txt = node.attrs.get("data-i18n")
             k_htm = node.attrs.get("data-i18n-html")
-            if k_txt and k_txt in i18n_map:
+            if k_txt and i18n_map.get(k_txt):
                 if not (skip_hidden and _is_text_hidden(inh)):
                     val = i18n_map[k_txt]
                     fused.append(val)
                     if val.strip():
                         compact.append(val.strip())
                 return
-            if k_htm and k_htm in i18n_map:
+            if k_htm and i18n_map.get(k_htm):
                 if not (skip_hidden and _is_text_hidden(inh)):
                     val = re.sub(r"<[^>]+>", "", i18n_map[k_htm])
                     fused.append(val)
@@ -2367,6 +2395,151 @@ def _collect_page_stylesheet_rules(
     return rules, issues, breakpoints
 
 
+def _collect_active_viewports(all_rules: list, breakpoints: set[float]) -> list[float]:
+    candidates = [320.0, 1440.0]
+    for bp in sorted(breakpoints)[:32]:
+        candidates.extend((max(0.0, bp - 0.5), bp, bp + 0.5))
+    seen_sigs: set[tuple[int, ...]] = set()
+    active_viewports: list[float] = []
+    for vw in candidates:
+        sig = tuple(r_idx for _, _, r_idx, _, (lo, hi) in all_rules if lo <= vw <= hi)
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            active_viewports.append(vw)
+    return active_viewports
+
+
+def _ensure_html_root(parser: _RenderedHTMLNormalizer) -> None:
+    if parser.xml_mode or any(isinstance(c, _DOMNode) and c.tag == "html" for c in parser.dom_root.children):
+        return
+    html_node = _DOMNode("html", {}, parent=parser.dom_root)
+    html_node.children = list(parser.dom_root.children)
+    for ch in html_node.children:
+        if isinstance(ch, _DOMNode):
+            ch.parent = html_node
+    parser.dom_root.children = [html_node]
+
+
+def _iter_runtime_dom_states(parser: _RenderedHTMLNormalizer, page_rel: str):
+    """Yield the initial parsed DOM state followed by all supported theme/locale/menu runtime states."""
+    html_node: _DOMNode | None = None
+    nav_node: _DOMNode | None = None
+    menu_btn: _DOMNode | None = None
+    theme_btn: _DOMNode | None = None
+    lang_btn: _DOMNode | None = None
+    stack: list[_DOMNode] = [c for c in parser.dom_root.children if isinstance(c, _DOMNode)]
+    while stack:
+        node = stack.pop()
+        if html_node is None and node.tag == "html":
+            html_node = node
+        if nav_node is None and node.id == "primary-nav":
+            nav_node = node
+        if menu_btn is None and "js-menu" in node.classes:
+            menu_btn = node
+        if theme_btn is None and "js-theme" in node.classes:
+            theme_btn = node
+        if lang_btn is None and "js-lang" in node.classes:
+            lang_btn = node
+        stack.extend(reversed([c for c in node.children if isinstance(c, _DOMNode)]))
+
+    snapshots: list[tuple[_DOMNode, dict[str, str], list[str | _DOMNode]]] = []
+    seen_ids: set[int] = set()
+    for n in (html_node, nav_node, menu_btn, theme_btn, lang_btn):
+        if n is not None and id(n) not in seen_ids:
+            seen_ids.add(id(n))
+            snapshots.append((n, dict(n.attrs), list(n.children)))
+
+    def _restore() -> None:
+        for n, saved_attrs, saved_children in snapshots:
+            n.attrs = dict(saved_attrs)
+            n.children = list(saved_children)
+
+    yield
+    has_bootstrap_js = any(
+        src is None
+        and raw_body.strip()
+        and hashlib.sha256(raw_body.encode("utf-8")).hexdigest() in APPROVED_SITE_INLINE_SCRIPTS
+        for src, raw_body in parser.script_tags
+    )
+    loads_app_js = any(
+        src is not None and resolve_site_asset_href(page_rel, src) == "site/assets/app.js"
+        for src, _ in parser.script_tags
+    )
+    if not (has_bootstrap_js or loads_app_js):
+        return
+    menus: tuple[str | None, ...] = (
+        ("false", "true") if (loads_app_js and nav_node is not None and menu_btn is not None) else (None,)
+    )
+    try:
+        for theme in ("light", "dark"):
+            for lang in ("en", "zh-CN"):
+                for menu_open in menus:
+                    _restore()
+                    if html_node is not None:
+                        html_node.attrs["data-theme"] = theme
+                        html_node.attrs["lang"] = lang
+                    if loads_app_js:
+                        if theme_btn is not None:
+                            theme_btn.attrs["aria-pressed"] = "true" if theme == "dark" else "false"
+                        if lang_btn is not None:
+                            lang_btn.attrs["lang"] = "en" if lang == "zh-CN" else "zh-CN"
+                            lang_btn.children = ["EN" if lang == "zh-CN" else "中文"]
+                        if menu_open is not None and nav_node is not None and menu_btn is not None:
+                            nav_node.attrs["data-open"] = menu_open
+                            menu_btn.attrs["aria-expanded"] = menu_open
+                    yield
+    finally:
+        _restore()
+
+
+def _check_cascaded_dom_integrity(
+    dom_root: _DOMNode, rules: list | tuple, viewports: list[float | None]
+) -> list[str]:
+    """Validate cascaded properties and explicit grid cell placement across DOM elements."""
+    issues: list[str] = []
+    seen_msgs: set[str] = set()
+
+    def _rec(msg: str) -> None:
+        if msg not in seen_msgs:
+            seen_msgs.add(msg)
+            issues.append(msg)
+
+    stack: list[_DOMNode] = [c for c in dom_root.children if isinstance(c, _DOMNode)]
+    while stack:
+        node = stack.pop()
+        child_nodes = [c for c in node.children if isinstance(c, _DOMNode)]
+        stack.extend(reversed(child_nodes))
+        for vw in viewports:
+            st = compute_node_style(node, rules, vw)
+            has_zero_clip = st.get("clip") == "zero"
+            has_abs_pos = st.get("position") == "absolute"
+            has_sr_only_clip = has_zero_clip and has_abs_pos
+            if has_zero_clip and not has_abs_pos:
+                _rec("clip:rect(0,0,0,0) without position:absolute")
+            if has_abs_pos and not has_zero_clip:
+                _rec("position:absolute without clip:rect(0,0,0,0)")
+            if st.get("overflow") == "hidden" and not has_sr_only_clip:
+                _rec("overflow:hidden without clip:rect(0,0,0,0)")
+            if st.get("flex-direction") == "column" and st.get("flex-wrap") == "wrap":
+                _rec("wrapped column flex visual reordering")
+            if node.tag == "html":
+                theme_bgs = {st.get(b) for b in ("--bg", "--surf")} - {None}
+                if theme_bgs and any(st.get(fg) in theme_bgs for fg in ("--ink", "--ink2", "--ink3", "--acc")):
+                    _rec("foreground custom property matching background")
+            if "grid" in str(st.get("display", "")).lower():
+                used_cells: set[tuple[int, int]] = set()
+                for ch in child_nodes:
+                    ch_st = compute_node_style(ch, rules, vw)
+                    if _omits_layout_box(ch, ch_st):
+                        continue
+                    gr, gc = ch_st.get("grid-row"), ch_st.get("grid-column")
+                    if isinstance(gr, int) and isinstance(gc, int):
+                        if (gr, gc) in used_cells:
+                            _rec("overlapping explicit CSS grid cell placement")
+                        used_cells.add((gr, gc))
+    return issues
+
+
 def normalize_html_text(
     text: str,
     depth: int = 0,
@@ -2384,58 +2557,55 @@ def normalize_html_text(
     parser.close()
     if parser._raw_tag is not None:
         parser._flush_raw_tag(parser._raw_tag)
+    _ensure_html_root(parser)
     all_rules, _, breakpoints = _collect_page_stylesheet_rules(
         page_rel, parser.stylesheet_entries, css_by_rel=css_by_rel
     )
-    candidates = [320.0, 1440.0]
-    for bp in sorted(breakpoints)[:32]:
-        candidates.extend((max(0.0, bp - 0.5), bp, bp + 0.5))
-    seen_sigs: set[tuple[int, ...]] = set()
-    active_viewports: list[float] = []
-    for vw in candidates:
-        sig = tuple(r_idx for _, _, r_idx, _, (lo, hi) in all_rules if lo <= vw <= hi)
-        if sig not in seen_sigs:
-            seen_sigs.add(sig)
-            active_viewports.append(vw)
+    active_viewports = _collect_active_viewports(all_rules, breakpoints)
 
-    vis_dom_f, vis_dom_c = serialize_visual_tree(
-        parser.dom_root, all_rules, viewport_w=None, respect_order=False, skip_hidden=True
-    )
-    rendered_views: list[str] = [vis_dom_f, vis_dom_c]
-    seen_rendered: set[str] = {vis_dom_f, vis_dom_c}
+    rendered_views: list[str] = []
+    seen_rendered: set[str] = set()
     has_i18n = "data-i18n" in text and bool(i18n_maps)
-    for vw in active_viewports:
-        for skip_hidden in (True, False):
-            for inc_pseudo in (False, True):
-                vf, vc = serialize_visual_tree(
-                    parser.dom_root,
-                    all_rules,
-                    viewport_w=vw,
-                    respect_order=True,
-                    skip_hidden=skip_hidden,
-                    include_pseudo=inc_pseudo,
-                )
-                for v in (vf, vc):
-                    if v not in seen_rendered:
-                        seen_rendered.add(v)
-                        rendered_views.append(v)
-                if has_i18n:
-                    for imap in i18n_maps:
-                        if not imap:
-                            continue
-                        ivf, ivc = serialize_visual_tree(
-                            parser.dom_root,
-                            all_rules,
-                            viewport_w=vw,
-                            respect_order=True,
-                            skip_hidden=skip_hidden,
-                            i18n_map=imap,
-                            include_pseudo=inc_pseudo,
-                        )
-                        for v in (ivf, ivc):
-                            if v not in seen_rendered:
-                                seen_rendered.add(v)
-                                rendered_views.append(v)
+    for _ in _iter_runtime_dom_states(parser, page_rel):
+        vis_dom_f, vis_dom_c = serialize_visual_tree(
+            parser.dom_root, all_rules, viewport_w=None, respect_order=False, skip_hidden=True
+        )
+        for v in (vis_dom_f, vis_dom_c):
+            if v not in seen_rendered:
+                seen_rendered.add(v)
+                rendered_views.append(v)
+        for vw in active_viewports:
+            for skip_hidden in (True, False):
+                for inc_pseudo in (False, True):
+                    vf, vc = serialize_visual_tree(
+                        parser.dom_root,
+                        all_rules,
+                        viewport_w=vw,
+                        respect_order=True,
+                        skip_hidden=skip_hidden,
+                        include_pseudo=inc_pseudo,
+                    )
+                    for v in (vf, vc):
+                        if v not in seen_rendered:
+                            seen_rendered.add(v)
+                            rendered_views.append(v)
+                    if has_i18n:
+                        for imap in i18n_maps:
+                            if not imap:
+                                continue
+                            ivf, ivc = serialize_visual_tree(
+                                parser.dom_root,
+                                all_rules,
+                                viewport_w=vw,
+                                respect_order=True,
+                                skip_hidden=skip_hidden,
+                                i18n_map=imap,
+                                include_pseudo=inc_pseudo,
+                            )
+                            for v in (ivf, ivc):
+                                if v not in seen_rendered:
+                                    seen_rendered.add(v)
+                                    rendered_views.append(v)
 
     combined = "\n".join([
         "".join(parser.inline_parts),
@@ -2483,15 +2653,22 @@ def check_site_visual_integrity(
         parser.close()
         if parser._raw_tag is not None:
             parser._flush_raw_tag(parser._raw_tag)
+        _ensure_html_root(parser)
         for iss in parser.html_issues:
             _emit(iss)
         for iss in parser.inline_css_issues:
             _emit(iss)
-        _, css_issues, breakpoints = _collect_page_stylesheet_rules(
+        all_rules, css_issues, breakpoints = _collect_page_stylesheet_rules(
             rel, parser.stylesheet_entries, css_by_rel=css_by_rel
         )
         for iss in css_issues:
             _emit(iss)
+        if len(breakpoints) > 32:
+            _emit(f"too many CSS @media breakpoints ({len(breakpoints)} > 32) in site/ page")
+        check_viewports: list[float | None] = [None, *_collect_active_viewports(all_rules, breakpoints)]
+        for _ in _iter_runtime_dom_states(parser, rel):
+            for iss in _check_cascaded_dom_integrity(parser.dom_root, all_rules, check_viewports):
+                _emit(iss)
         if len(breakpoints) > 32:
             _emit(f"too many CSS @media breakpoints ({len(breakpoints)} > 32) in site/ page")
         if suffix != ".svg":
