@@ -1052,6 +1052,7 @@ JS_ESCAPE_RE = re.compile(
     r"\\(?:u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([/'\"\\]))"
 )
 CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?")
+LINE_CONTINUATION_RE = re.compile(r"\\(?:\r\n|[\r\n\f])")
 INLINE_DISPLAY_RE = re.compile(r"(?i)\bdisplay\s*:\s*(?:inline(?:-[a-z-]+)?|contents)\b")
 HTML_BLOCK_TAGS = {
     "address", "article", "aside", "blockquote", "body", "br", "caption", "dd",
@@ -1075,7 +1076,7 @@ def unescape_js_literals(text: str) -> str:
             return chr(cp)
         return match.group(0)
 
-    return JS_ESCAPE_RE.sub(_repl, text)
+    return JS_ESCAPE_RE.sub(_repl, LINE_CONTINUATION_RE.sub("", text))
 
 
 def unescape_css_literals(text: str) -> str:
@@ -1086,7 +1087,7 @@ def unescape_css_literals(text: str) -> str:
             return chr(cp)
         return match.group(0)
 
-    return CSS_ESCAPE_RE.sub(_repl, text)
+    return CSS_ESCAPE_RE.sub(_repl, LINE_CONTINUATION_RE.sub("", text))
 
 
 class _RenderedHTMLNormalizer(HTMLParser):
@@ -1094,6 +1095,8 @@ class _RenderedHTMLNormalizer(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.depth = depth
         self.inline_parts: list[str] = []
+        self.fused_parts: list[str] = []
+        self.compact_parts: list[str] = []
         self.attr_lines: list[str] = []
         self.comment_lines: list[str] = []
         self.subtrees: list[str] = []
@@ -1165,6 +1168,9 @@ class _RenderedHTMLNormalizer(HTMLParser):
             self._raw_chunks.append(data)
             return
         self.inline_parts.append(data)
+        self.fused_parts.append(data)
+        if data.strip():
+            self.compact_parts.append(data.strip())
 
     def handle_comment(self, data: str) -> None:
         self.comment_lines.append(html.unescape(data))
@@ -1179,6 +1185,8 @@ def normalize_html_text(text: str, depth: int = 0) -> str:
         parser._flush_raw_tag(parser._raw_tag)
     combined = "\n".join([
         "".join(parser.inline_parts),
+        "".join(parser.fused_parts),
+        "".join(parser.compact_parts),
         "\n".join(parser.attr_lines),
         "\n".join(parser.comment_lines),
         *parser.subtrees,

@@ -219,7 +219,8 @@ class LeakTest(CheckerTestCase):
         self.write(
             "site/index.html",
             '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n'
-            "<p>Visit QuantStrategyLab.</p><p>local notes</p>\n",
+            "<p>Visit QuantStrategyLab.</p>\n"
+            "<p>Public architecture notes.</p>\n",
         )
         self.write(
             "site/assets/styles.css",
@@ -255,6 +256,18 @@ class LeakTest(CheckerTestCase):
             '<p>&#47;home&#47;<strong>operator</strong>&#47;prod&#47;config and '
             'db-primary&#46;<span>ops</span>&#46;internal</p>'
             '<a href="https:&#47;&#47;actual-private-app&#46;workers&#46;dev">x</a>\n',
+        )
+        self.write(
+            "site/css-inline-leak.html",
+            '<style>.join{display:inline}</style>'
+            '<span>/home/</span><div class="join">operator</div><span>/prod/config</span>\n',
+        )
+        self.write(
+            "site/css-flex-leak.html",
+            '<style>.row{display:flex}</style><div class="row">\n'
+            '  <div>db-primary.</div>\n'
+            '  <div>ops.internal</div>\n'
+            '</div>\n',
         )
         self.write(
             "site/escaped-leak.js",
@@ -349,6 +362,8 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/rendered-leak.html" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/rendered-leak.html" in m and "internal hostname" in m for m in msgs))
         self.assertTrue(any("site/rendered-leak.html" in m and "personal subdomain" in m for m in msgs))
+        self.assertTrue(any("site/css-inline-leak.html" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/css-flex-leak.html" in m and "internal hostname" in m for m in msgs))
         self.assertTrue(any("site/escaped-leak.js" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/data-uri.html" in m and "embedded data URI asset" in m for m in msgs))
         self.assertTrue(any("site/actual-private-app.workers.dev/index.html" in m and "personal subdomain" in m for m in msgs))
