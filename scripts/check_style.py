@@ -670,19 +670,33 @@ def blank_fenced_blocks(text: str) -> str:
     return FENCED_BLOCK.sub(blank, text)
 
 
+DEPLOYED_SITE_TEXT_SUFFIXES = {
+    ".html", ".htm", ".js", ".mjs", ".css", ".svg", ".json", ".webmanifest", ".txt", ".xml",
+}
+
+
+def is_deployed_site_text(root: Path, path: Path) -> bool:
+    """Return True for textual static-site assets published directly from site/."""
+    rel = path.relative_to(root).as_posix()
+    return rel.startswith("site/") and path.suffix.lower() in DEPLOYED_SITE_TEXT_SUFFIXES
+
+
 def check_leaks(root: Path, report: Report) -> None:
     for path in iter_files(root):
-        if not is_markdown(path):
+        markdown = is_markdown(path)
+        if not markdown and not is_deployed_site_text(root, path):
             continue
         rel = path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8", errors="ignore")
-        prose = blank_fenced_blocks(text)
+        prose = blank_fenced_blocks(text) if markdown else text
+        masked = blank_code_spans(prose) if markdown else text
         ctx = FileContext(
             url_spans=[(m.start(), m.end()) for m in URL_TOKEN.finditer(text)],
             prose=prose,
-            masked=blank_code_spans(prose),
+            masked=masked,
         )
-        for pattern, category, label, predicate in LEAK_PATTERNS:
+        patterns = LEAK_PATTERNS if markdown else LEAK_PATTERNS[:3]
+        for pattern, category, label, predicate in patterns:
             for match in pattern.finditer(text):
                 # A pattern without a predicate describes prose, and a fenced
                 # block is not prose. The style guide shows each of these

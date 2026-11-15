@@ -174,6 +174,23 @@ class LeakTest(CheckerTestCase):
         path_found = self.findings("```bash\ncat /home/operator/prod/config\n```\n")
         self.assertTrue(any("absolute home path" in m for m in path_found))
 
+    def test_deployed_site_text_assets_are_scanned_for_identifier_leaks(self):
+        self.write("site/index.html", '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n')
+        clean_report = self.report()
+        check_style.check_leaks(self.root, clean_report)
+        self.assertEqual(clean_report.findings, [])
+
+        self.write(
+            "site/index.html",
+            '<!-- deploy from /home/operator/prod/config -->\n'
+            '<script>const api = "https://ops-portal.workers.dev";</script>\n',
+        )
+        dirty_report = self.report()
+        check_style.check_leaks(self.root, dirty_report)
+        msgs = [m for _, m in dirty_report.findings]
+        self.assertTrue(any("personal subdomain" in m for m in msgs))
+        self.assertTrue(any("absolute home path" in m for m in msgs))
+
     def test_sha_in_url_is_not_reported(self):
         text = (
             "- [Store](https://github.com/QuantStrategyLab/QuantPlatformKit/blob/"
