@@ -13,3 +13,8 @@ docs/superpowers/
 ops-notes/
 *.local.md
 *.internal.md
+
+docs/changes/
+docs/acceptance-policy.md
+.claude/
+.codex/
