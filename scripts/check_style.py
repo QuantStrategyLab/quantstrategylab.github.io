@@ -30,6 +30,7 @@ Exit code 0 when nothing in the blocking set is found.
 from __future__ import annotations
 
 import argparse
+import base64
 import fnmatch
 import ipaddress
 import re
@@ -37,6 +38,7 @@ import subprocess
 import sys
 import unicodedata
 import urllib.parse
+import zlib
 from pathlib import Path
 from typing import NamedTuple
 
@@ -681,32 +683,151 @@ def blank_fenced_blocks(text: str) -> str:
     return FENCED_BLOCK.sub(blank, text)
 
 
-BINARY_SITE_SUFFIXES = {
+ALLOWED_BINARY_MEDIA_SUFFIXES = {
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".avif", ".bmp", ".tiff",
-    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".wasm", ".zip", ".gz", ".br",
-    ".tar", ".pdf", ".mp3", ".mp4", ".mov", ".webm",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp3", ".mp4", ".mov", ".webm",
 }
 
+PDF_IMAGE_FILTERS = (b"/DCTDecode", b"/JPXDecode", b"/JBIG2Decode", b"/CCITTFaxDecode")
+PDF_LITERAL = re.compile(r"\(([^()\\]*(?:\\.[^()\\]*)*)\)")
+PDF_HEX = re.compile(r"<([0-9A-Fa-f\s]{4,})>")
+PDF_TJ_ARRAY = re.compile(r"\[((?:[^\[\]]|\((?:[^()\\]|\\.)*\))*)\]\s*TJ")
+PDF_STREAM = re.compile(rb"stream(?:\r\n|\r|\n)(.*?)(?:\r\n|\r|\n)?endstream", re.DOTALL)
 
-def read_deployed_site_text(root: Path, path: Path) -> str | None:
-    """Return decoded text for any decodable non-binary file published under site/."""
-    rel = path.relative_to(root).as_posix()
-    if not rel.startswith("site/") or path.suffix.lower() in BINARY_SITE_SUFFIXES:
+
+def _decode_pdf_bytes(buf: bytes) -> str:
+    if buf.startswith(b"\xfe\xff"):
+        return buf[2:].decode("utf-16-be", errors="ignore")
+    if buf.startswith(b"\xff\xfe"):
+        return buf[2:].decode("utf-16-le", errors="ignore")
+    return buf.decode("utf-8", errors="ignore")
+
+
+def _unescape_pdf_literal(raw_s: str) -> str:
+    buf = bytearray()
+    i = 0
+    while i < len(raw_s):
+        ch = raw_s[i]
+        if ch == "\\" and i + 1 < len(raw_s):
+            nxt = raw_s[i + 1]
+            if nxt in "01234567":
+                oct_m = re.match(r"[0-7]{1,3}", raw_s[i + 1:i + 4])
+                buf.append(int(oct_m.group(0), 8) & 0xFF)
+                i += 1 + len(oct_m.group(0))
+                continue
+            if nxt in "\r\n":
+                i += 3 if raw_s[i + 1:i + 3] == "\r\n" else 2
+                continue
+            esc = {"n": 10, "r": 13, "t": 9, "b": 8, "f": 12}.get(nxt)
+            buf.append(esc if esc is not None else ord(nxt) & 0xFF)
+            i += 2
+        else:
+            buf.append(ord(ch) & 0xFF)
+            i += 1
+    return _decode_pdf_bytes(bytes(buf))
+
+
+def _extract_pdf_strings(text: str) -> list[str]:
+    extracted: list[str] = []
+    for arr_m in PDF_TJ_ARRAY.finditer(text):
+        joined = "".join(_unescape_pdf_literal(m.group(1)) for m in PDF_LITERAL.finditer(arr_m.group(1)))
+        if joined:
+            extracted.append(joined)
+    for m in PDF_LITERAL.finditer(text):
+        val = _unescape_pdf_literal(m.group(1))
+        if val:
+            extracted.append(val)
+    for m in PDF_HEX.finditer(text):
+        hx = re.sub(r"\s+", "", m.group(1))
+        if len(hx) % 2 == 1:
+            hx += "0"
+        raw_b = bytes.fromhex(hx)
+        if raw_b.startswith((b"\xfe\xff", b"\xff\xfe")):
+            extracted.append(_decode_pdf_bytes(raw_b))
+        elif all(32 <= b < 127 or b in (9, 10, 13) for b in raw_b):
+            extracted.append(raw_b.decode("ascii", errors="ignore"))
+    return extracted
+
+
+def _decode_pdf_ascii85(data: bytes) -> bytes:
+    stripped = data.strip()
+    return base64.a85decode(stripped, adobe=stripped.endswith(b"~>"))
+
+
+def _decode_pdf_asciihex(data: bytes) -> bytes:
+    cleaned = re.sub(rb"[\s>]+", b"", data.rstrip(b"> \r\n\t"))
+    if len(cleaned) % 2 == 1:
+        cleaned += b"0"
+    return bytes.fromhex(cleaned.decode("ascii"))
+
+
+def _pdf_stream_filters(header: bytes) -> list[bytes]:
+    m = re.search(rb"/Filter\s*(?:\[([^\]]+)\]|/([A-Za-z0-9]+))", header)
+    if not m:
+        return []
+    if m.group(2):
+        return [m.group(2)]
+    return re.findall(rb"/([A-Za-z0-9]+)", m.group(1))
+
+
+def extract_pdf_text(raw: bytes) -> str | None:
+    """Return extracted PDF metadata/content text, or None if encrypted/unreadable."""
+    if not raw.lstrip().startswith(b"%PDF-") or re.search(rb"/Encrypt\b", raw):
         return None
+    parts: list[str] = [raw.decode("latin-1")]
+    for m in PDF_STREAM.finditer(raw):
+        obj_start = max(0, raw.rfind(b"endobj", 0, m.start()))
+        header = raw[obj_start:m.start()]
+        if b"/Subtype/Image" in header or b"/Subtype /Image" in header:
+            continue
+        filters = _pdf_stream_filters(header)
+        if any(b"/" + f in PDF_IMAGE_FILTERS for f in filters):
+            continue
+        data = m.group(1)
+        for flt in filters:
+            try:
+                if flt == b"ASCII85Decode":
+                    data = _decode_pdf_ascii85(data)
+                elif flt == b"ASCIIHexDecode":
+                    data = _decode_pdf_asciihex(data)
+                elif flt == b"FlateDecode":
+                    data = zlib.decompress(data)
+                else:
+                    return None
+            except (ValueError, zlib.error):
+                return None
+        stream_text = data.decode("latin-1")
+        parts.append(stream_text)
+        parts.extend(_extract_pdf_strings(stream_text))
+    parts.extend(_extract_pdf_strings(parts[0]))
+    return "\n".join(parts)
+
+
+def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
+    """Return ('text', str), ('skip', None), or ('unscanned_binary', None) for site/ assets."""
+    rel = path.relative_to(root).as_posix()
+    if not rel.startswith("site/"):
+        return "skip", None
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        text = extract_pdf_text(path.read_bytes())
+        return ("text", text) if text is not None else ("unscanned_binary", None)
+    if suffix in ALLOWED_BINARY_MEDIA_SUFFIXES:
+        return "skip", None
     raw = path.read_bytes()
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
-            return raw.decode("utf-16")
+            return "text", raw.decode("utf-16")
         except UnicodeDecodeError:
-            return None
+            return "unscanned_binary", None
     if b"\x00" in raw:
-        return None
+        return "unscanned_binary", None
     try:
-        return raw.decode("utf-8")
+        return "text", raw.decode("utf-8")
     except UnicodeDecodeError:
         if any(b < 32 and b not in (9, 10, 13) for b in raw):
-            return None
-        return raw.decode("utf-8", errors="ignore")
+            return "unscanned_binary", None
+        return "text", raw.decode("utf-8", errors="ignore")
 
 
 INTERNAL_IPV4_NETWORKS = (
@@ -772,15 +893,21 @@ SITE_LEAK_PATTERNS = [
 
 def check_leaks(root: Path, report: Report) -> None:
     for path in iter_files(root):
+        rel = path.relative_to(root).as_posix()
         markdown = is_markdown(path)
         if markdown:
             text = path.read_text(encoding="utf-8", errors="ignore")
         else:
-            site_text = read_deployed_site_text(root, path)
-            if site_text is None:
+            status, site_text = read_deployed_site_asset(root, path)
+            if status == "unscanned_binary":
+                report.add(
+                    "publish",
+                    f"{rel}: unscanned binary or encrypted asset in published site/ tree (section 13)",
+                )
+                continue
+            if status != "text" or site_text is None:
                 continue
             text = site_text
-        rel = path.relative_to(root).as_posix()
         prose = blank_fenced_blocks(text) if markdown else text
         masked = blank_code_spans(prose) if markdown else text
         ctx = FileContext(

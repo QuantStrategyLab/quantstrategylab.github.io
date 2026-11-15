@@ -175,9 +175,20 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("absolute home path" in m for m in path_found))
 
     def test_deployed_site_text_assets_are_scanned_for_identifier_leaks(self):
+        import zlib
+
+        def make_pdf(content: bytes, *, compressed: bool = False, extra_dict: bytes = b"") -> bytes:
+            if compressed:
+                stream = zlib.compress(content)
+                body = f"<< /Length {len(stream)} /Filter /FlateDecode >>\nstream\n".encode() + stream + b"\nendstream"
+            else:
+                body = f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream"
+            return b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog " + extra_dict + b" >>\nendobj\n2 0 obj\n" + body + b"\nendobj\n%%EOF\n"
+
         self.write("site/index.html", '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n')
         self.write("site/assets/styles.css", "a::before { content: ''; }\n/* example 192.0.2.1 2001:db8::1 */\n")
         (self.root / "site/logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+        (self.root / "site/clean.pdf").write_bytes(make_pdf(b"BT (QuantStrategyLab Docs) Tj ET", compressed=True))
         clean_report = self.report()
         check_style.check_leaks(self.root, clean_report)
         self.assertEqual(clean_report.findings, [])
@@ -200,6 +211,16 @@ class LeakTest(CheckerTestCase):
             "site/private-ip.html",
             "<!-- internal: http://10.23.45.67:8080, v6: http://[fd12:3456:789a::1]/api, meta: 169.254.169.254, ll: fe80::1 -->\n",
         )
+        (self.root / "site/leak-compressed.pdf").write_bytes(
+            make_pdf(
+                b"BT [(/home/op) -10 (erator/prod/config)] TJ (https://actual-private-app.workers.dev) Tj (10.23.45.67) Tj ET",
+                compressed=True,
+            )
+        )
+        (self.root / "site/encrypted.pdf").write_bytes(
+            make_pdf(b"BT (opaque) Tj ET", compressed=True, extra_dict=b"/Encrypt 3 0 R")
+        )
+        (self.root / "site/bundle.zip").write_bytes(b"PK\x03\x04\x00\x00payload")
         dirty_report = self.report()
         check_style.check_leaks(self.root, dirty_report)
         check_style.check_internal_paths(self.root, dirty_report)
@@ -214,6 +235,11 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/private-ip.html" in m and "private IPv4 address" in m and "169.254.169.254" in m for m in msgs))
         self.assertTrue(any("site/private-ip.html" in m and "private IPv6 address" in m and "fd12:3456:789a::1" in m for m in msgs))
         self.assertTrue(any("site/private-ip.html" in m and "private IPv6 address" in m and "fe80::1" in m for m in msgs))
+        self.assertTrue(any("site/leak-compressed.pdf" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/leak-compressed.pdf" in m and "personal subdomain" in m for m in msgs))
+        self.assertTrue(any("site/leak-compressed.pdf" in m and "private IPv4 address" in m for m in msgs))
+        self.assertTrue(any("site/encrypted.pdf" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertTrue(any("site/bundle.zip" in m and "unscanned binary or encrypted asset" in m for m in msgs))
 
     def test_sha_in_url_is_not_reported(self):
         text = (
