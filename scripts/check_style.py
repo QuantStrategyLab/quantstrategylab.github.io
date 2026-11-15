@@ -30,6 +30,7 @@ Exit code 0 when nothing in the blocking set is found.
 from __future__ import annotations
 
 import argparse
+import base64
 import fnmatch
 import hashlib
 import html
@@ -1048,6 +1049,8 @@ def account_field_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
 
 
 INVISIBLE_FORMAT_RE = re.compile(r"[\u00ad\u200b\u200c\u200d\u2060\ufeff]")
+BIDI_CONTROL_RE = re.compile(r"[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]")
+CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 JS_ESCAPE_RE = re.compile(
     r"\\(?:u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([/'\"\\]))"
 )
@@ -1063,6 +1066,34 @@ HTML_BLOCK_TAGS = {
     "summary", "table", "tbody", "td", "template", "tfoot", "th", "thead",
     "title", "tr", "ul", "text",
 }
+HTML_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
+SIMPLE_COMPOUND_RE = re.compile(
+    r"^(?:[a-zA-Z][a-zA-Z0-9-]*)?(?:(?:#[a-zA-Z0-9_-]+)|(?:\.[a-zA-Z0-9_-]+)|(?:\[[a-zA-Z0-9_-]+(?:=[a-zA-Z0-9_\"'-]+)?\]))*$"
+)
+DISALLOWED_SITE_CSS_RE = [
+    (re.compile(r"(?i)@import\b"), "CSS @import external stylesheet"),
+    (re.compile(r"(?i)url\(\s*[\"']?(?:https?:|//)"), "CSS remote resource URL"),
+    (re.compile(r"(?i)\bflex-direction\s*:\s*(?:row|column)-reverse\b"), "reverse flex visual ordering"),
+    (re.compile(r"(?i)\bflex-wrap\s*:\s*wrap-reverse\b"), "reverse flex-wrap visual ordering"),
+    (re.compile(r"(?i)(?<![a-z-])direction\s*:\s*rtl\b"), "RTL CSS text direction"),
+    (re.compile(r"(?i)\bunicode-bidi\s*:\s*(?!normal\b)[a-z-]+"), "CSS unicode-bidi override"),
+    (re.compile(r"(?i)\bwriting-mode\s*:\s*(?!horizontal-tb\b)[a-z-]+"), "non-horizontal CSS writing-mode"),
+    (re.compile(r"(?i)(?<![a-z-])float\s*:\s*(?!none\b)[a-z-]+"), "CSS float visual reordering"),
+    (re.compile(r"(?i)(?<![a-z-])(?:left|right|top|bottom|inset(?:-[a-z-]+)?)\s*:\s*(?!auto\b)[^;}]+"), "CSS coordinate offset positioning"),
+    (re.compile(r"(?i)(?<![a-z-])(?:transform|translate)\s*:\s*(?!none\b)[^;}]+"), "CSS transform visual positioning"),
+    (re.compile(r"(?i)\bgrid-(?:template-areas|area)\s*:"), "CSS named grid-area placement"),
+    (re.compile(r"(?i)\bgrid-auto-flow\s*:[^;}]*\bdense\b"), "CSS dense grid auto-placement"),
+]
+DISALLOWED_SITE_HTML_RE = [
+    (re.compile(r"(?i)<\s*(?:bdo|bdi)\b"), "HTML bidirectional override element"),
+    (re.compile(r"(?i)\bdir\s*=\s*[\"']?\s*(?:rtl|auto)\b"), "HTML non-LTR dir attribute"),
+    (re.compile(r"(?i)<\s*(?:text|tspan|textPath|foreignObject)\b"), "SVG positioned text or foreignObject element"),
+    (re.compile(r"(?i)<\s*(?:iframe|object|embed)\b"), "embedded browsing context in site/"),
+    (re.compile(r"(?i)<\s*(?:link\b[^>]*rel\s*=\s*[\"']?stylesheet[^>]*href|script\b[^>]*src)\s*=\s*[\"']?(?:https?:|//)"), "remote stylesheet or script in site/"),
+]
 
 
 def unescape_js_literals(text: str) -> str:
@@ -1090,6 +1121,473 @@ def unescape_css_literals(text: str) -> str:
     return CSS_ESCAPE_RE.sub(_repl, LINE_CONTINUATION_RE.sub("", text))
 
 
+def fold_js_expressions(text: str) -> str:
+    """Decode common JS literal obfuscations (atob, fromCharCode, array join, string concat)."""
+    out = unescape_js_literals(text)
+    extras: list[str] = []
+    for m in re.finditer(r"\batob\(\s*([\"'])([A-Za-z0-9+/=\s]{4,})\1\s*\)", out):
+        try:
+            decoded = base64.b64decode(re.sub(r"\s+", "", m.group(2))).decode("utf-8", errors="ignore")
+            if decoded:
+                extras.append(decoded)
+        except Exception:
+            pass
+    for m in re.finditer(r"String\s*\.\s*from(?:CharCode|CodePoint)\s*\(([^)]+)\)", out):
+        chars: list[str] = []
+        for tok in m.group(1).split(","):
+            tok = tok.strip()
+            try:
+                cp = int(tok, 0)
+                if 0 < cp <= 0x10FFFF and not (0xD800 <= cp <= 0xDFFF):
+                    chars.append(chr(cp))
+            except ValueError:
+                pass
+        if chars:
+            extras.append("".join(chars))
+    for m in re.finditer(
+        r"\[\s*((?:(?:\"[^\"\\]*\"|'[^'\\]*')\s*,\s*)*(?:\"[^\"\\]*\"|'[^'\\]*'))\s*\]"
+        r"(\s*\.\s*reverse\s*\(\s*\))?\s*\.\s*join\s*\(\s*(?:\"([^\"]*)\"|'([^']*)')?\s*\)",
+        out,
+    ):
+        items = [im.group(1) if im.group(1) is not None else im.group(2) for im in re.finditer(r"\"([^\"]*)\"|'([^']*)'", m.group(1))]
+        if m.group(2):
+            items.reverse()
+        sep = m.group(3) if m.group(3) is not None else (m.group(4) if m.group(4) is not None else ",")
+        extras.append(sep.join(items))
+    folded = out
+    for _ in range(8):
+        nxt = re.sub(r"\"([^\"\\]*)\"\s*\+\s*\"([^\"\\]*)\"", r'"\1\2"', folded)
+        nxt = re.sub(r"'([^'\\]*)'\s*\+\s*'([^'\\]*)'", r"'\1\2'", nxt)
+        if nxt == folded:
+            break
+        folded = nxt
+    return "\n".join([folded, *extras]) if extras else folded
+
+
+def count_grid_columns(val: str) -> int | None:
+    """Count static tracks in a CSS grid-template-columns declaration, or -1 if dynamic."""
+    v = val.strip().lower()
+    if v in ("none", "auto"):
+        return None
+    parts: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in v:
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch.isspace() and depth == 0:
+            if cur:
+                parts.append("".join(cur))
+                cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append("".join(cur))
+    total = 0
+    for tok in parts:
+        if tok.startswith("[") and tok.endswith("]"):
+            continue
+        m = re.match(r"^repeat\(\s*(\d+)\s*,\s*(.+)\)$", tok)
+        if m:
+            sub = count_grid_columns(m.group(2))
+            if not sub or sub < 1:
+                return -1
+            total += int(m.group(1)) * sub
+        elif tok.startswith("repeat(") or "subgrid" in tok:
+            return -1
+        else:
+            total += 1
+    return total if total >= 1 else -1
+
+
+def parse_style_decls(decl_text: str) -> tuple[dict[str, tuple[object, bool]], list[str]]:
+    """Parse CSS declarations relevant to visual layout, ordering, and visibility."""
+    props: dict[str, tuple[object, bool]] = {}
+    invalid: list[str] = []
+    clean = CSS_COMMENT_RE.sub("", unescape_css_literals(decl_text))
+    for part in clean.split(";"):
+        if ":" not in part:
+            continue
+        k, raw_v = part.split(":", 1)
+        k = k.strip().lower()
+        imp = bool(re.search(r"(?i)!important\s*$", raw_v))
+        v = re.sub(r"(?i)\s*!important\s*$", "", raw_v.strip()).strip()
+        if k == "display":
+            props["display"] = (v.lower(), imp)
+        elif k == "visibility":
+            props["visibility"] = (v.lower(), imp)
+        elif k == "opacity":
+            props["opacity"] = (v.lower(), imp)
+        elif k == "font-size":
+            props["font-size"] = (v.lower(), imp)
+        elif k == "order":
+            m = re.match(r"^[+-]?\d+$", v)
+            if m:
+                props["order"] = (int(m.group(0)), imp)
+            else:
+                invalid.append(f"order:{v[:24]}")
+        elif k in ("grid-row", "grid-row-start", "grid-column", "grid-column-start"):
+            prop_key = "grid-row" if k.startswith("grid-row") else "grid-column"
+            if v.lower() == "auto":
+                props[prop_key] = (None, imp)
+            else:
+                m = re.match(r"^(\d+)(?:\s*/\s*(\d+))?$", v)
+                if m and int(m.group(1)) >= 1 and (m.group(2) is None or int(m.group(2)) > int(m.group(1))):
+                    props[prop_key] = (int(m.group(1)), imp)
+                else:
+                    invalid.append(f"{k}:{v[:24]}")
+        elif k == "grid-template-columns":
+            cols = count_grid_columns(v)
+            if cols == -1:
+                invalid.append(f"grid-template-columns:{v[:24]}")
+            elif cols is not None:
+                props["grid-cols"] = (cols, imp)
+    return props, invalid
+
+
+def _check_css_safety(clean_css: str) -> list[str]:
+    """Flag CSS constructs capable of unanalyzable visual reordering or text injection."""
+    issues: list[str] = []
+    for rx, label in DISALLOWED_SITE_CSS_RE:
+        m = rx.search(clean_css)
+        if m:
+            issues.append(f"{label} ({m.group(0).strip()[:36]})")
+    for m in re.finditer(r"(?i)(?<![a-z-])content\s*:\s*([^;}]+)", clean_css):
+        val = m.group(1).strip()
+        rem = re.sub(r"(?i)\bcounter\([^)]*\)", "", val)
+        rem = re.sub(r"(?i)\b(?:none|normal|open-quote|close-quote)\b", "", rem)
+        rem = re.sub(r"[\"\'\s.]", "", rem)
+        if rem:
+            issues.append(f"CSS content text injection ({val[:36]})")
+    return issues
+
+
+def parse_simple_selector(sel: str):
+    """Parse descendant/child CSS selectors of tags, ids, classes, and attributes."""
+    tokens = [t for t in re.split(r"(\s*>\s*|\s+)", sel.strip()) if t]
+    chain = []
+    comb: str | None = None
+    spec_ids = spec_cls = spec_tags = 0
+    for tok in tokens:
+        if ">" in tok:
+            comb = ">"
+            continue
+        if tok.isspace():
+            if comb is None:
+                comb = " "
+            continue
+        if not SIMPLE_COMPOUND_RE.match(tok) or tok == "":
+            return None, (0, 0, 0)
+        tag_m = re.match(r"^([a-zA-Z][a-zA-Z0-9-]*)", tok)
+        tag = tag_m.group(1).lower() if tag_m else None
+        if tag:
+            spec_tags += 1
+        ids = re.findall(r"#([a-zA-Z0-9_-]+)", tok)
+        spec_ids += len(ids)
+        classes = re.findall(r"\.([a-zA-Z0-9_-]+)", tok)
+        attrs: list[tuple[str, str | None]] = []
+        for am in re.finditer(r"\[([a-zA-Z0-9_-]+)(?:=([a-zA-Z0-9_\"'-]+))?\]", tok):
+            ak = am.group(1).lower()
+            av = am.group(2).strip("\"'") if am.group(2) is not None else None
+            attrs.append((ak, av))
+        spec_cls += len(classes) + len(attrs)
+        chain.append((comb, tag, ids, classes, attrs))
+        comb = None
+    return (chain if chain else None), (spec_ids, spec_cls, spec_tags)
+
+
+def parse_css_stylesheet(
+    css_text: str,
+    in_media: bool = False,
+    start_idx: int = 0,
+) -> tuple[list, list[str], int]:
+    """Parse stylesheet rules for visual-order reconstruction and flag unsafe layout rules."""
+    clean = CSS_COMMENT_RE.sub("", unescape_css_literals(css_text))
+    rules: list = []
+    issues: list[str] = [] if in_media else _check_css_safety(clean)
+    idx = start_idx
+    layout_keys = {"display", "order", "grid-row", "grid-column", "grid-cols", "visibility", "opacity"}
+    i, n = 0, len(clean)
+    while i < n:
+        brace = clean.find("{", i)
+        if brace == -1:
+            break
+        prelude = clean[i:brace].strip()
+        depth = 1
+        j = brace + 1
+        while j < n and depth > 0:
+            if clean[j] == "{":
+                depth += 1
+            elif clean[j] == "}":
+                depth -= 1
+            j += 1
+        body = clean[brace + 1:j - 1]
+        i = j
+        if not prelude:
+            continue
+        if prelude.startswith("@"):
+            if prelude.lower().startswith(("@media", "@supports", "@layer", "@container")):
+                sub_rules, sub_issues, idx = parse_css_stylesheet(body, in_media=True, start_idx=idx)
+                rules.extend(sub_rules)
+                issues.extend(sub_issues)
+            continue
+        props, bad_vals = parse_style_decls(body)
+        issues.extend(f"non-literal CSS visual-order value ({bv})" for bv in bad_vals)
+        fs_val = props.get("font-size", ("", False))[0]
+        has_zero_font = isinstance(fs_val, str) and bool(re.match(r"^0(?:\.0+)?(?:[a-z%]+)?$", fs_val))
+        has_layout_prop = has_zero_font or any(k in props for k in layout_keys)
+        for sel in prelude.split(","):
+            sel = sel.strip()
+            if not sel:
+                continue
+            chain, spec = parse_simple_selector(sel)
+            if chain is None:
+                if has_layout_prop:
+                    issues.append(f"complex CSS visual-order selector ({sel[:36]})")
+            else:
+                idx += 1
+                rules.append((chain, spec, idx, props, in_media))
+    return rules, issues, idx
+
+
+class _DOMNode:
+    def __init__(self, tag: str, attrs: dict[str, str], parent: "_DOMNode | None" = None) -> None:
+        self.tag = tag
+        self.attrs = attrs
+        self.parent = parent
+        self.children: list[str | _DOMNode] = []
+        self.classes = set(attrs.get("class", "").split())
+        self.id = attrs.get("id", "")
+
+
+def _matches_compound(node: _DOMNode, tag, ids, classes, attrs) -> bool:
+    if tag and node.tag != tag:
+        return False
+    if any(i != node.id for i in ids):
+        return False
+    if any(c not in node.classes for c in classes):
+        return False
+    for ak, av in attrs:
+        if ak not in node.attrs:
+            return False
+        if av is not None and node.attrs[ak] != av:
+            return False
+    return True
+
+
+def _matches_chain(node: _DOMNode, chain) -> bool:
+    if not _matches_compound(node, *chain[-1][1:]):
+        return False
+    cur = node
+    for idx in range(len(chain) - 1, 0, -1):
+        comb = chain[idx][0]
+        target = chain[idx - 1][1:]
+        if comb == ">":
+            if cur.parent is None or cur.parent.tag == "__root__" or not _matches_compound(cur.parent, *target):
+                return False
+            cur = cur.parent
+        else:
+            anc = cur.parent
+            while anc is not None and anc.tag != "__root__":
+                if _matches_compound(anc, *target):
+                    break
+                anc = anc.parent
+            else:
+                return False
+            cur = anc
+    return True
+
+
+def compute_node_style(node: _DOMNode, rules: list | tuple, include_media: bool) -> dict[str, object]:
+    """Compute cascaded CSS properties on a DOM node using selector specificity."""
+    resolved: dict[str, tuple[tuple[int, int, int, int, int, int], object]] = {}
+    for chain, spec, r_idx, props, in_media in rules:
+        if in_media and not include_media:
+            continue
+        if _matches_chain(node, chain):
+            for prop, (val, imp) in props.items():
+                rank = (1 if imp else 0, 0, spec[0], spec[1], spec[2], r_idx)
+                if prop not in resolved or rank >= resolved[prop][0]:
+                    resolved[prop] = (rank, val)
+    inline_s = node.attrs.get("style", "")
+    if inline_s:
+        iprops, _ = parse_style_decls(inline_s)
+        for prop, (val, imp) in iprops.items():
+            rank = (1 if imp else 0, 1, 0, 0, 0, 10**9)
+            if prop not in resolved or rank >= resolved[prop][0]:
+                resolved[prop] = (rank, val)
+    return {k: v[1] for k, v in resolved.items()}
+
+
+def _is_hidden_node(node: _DOMNode, st: dict[str, object]) -> bool:
+    if node.tag in ("template", "script", "style", "noscript") or "hidden" in node.attrs:
+        return True
+    if st.get("display") == "none" or st.get("visibility") in ("hidden", "collapse"):
+        return True
+    if st.get("opacity") in ("0", "0.0", ".0"):
+        return True
+    fs = st.get("font-size")
+    if isinstance(fs, str) and re.match(r"^0(?:\.0+)?(?:[a-z%]+)?$", fs):
+        return True
+    return False
+
+
+_TABLE_SECTION_ORDER = {
+    "caption": 0,
+    "colgroup": 1,
+    "col": 1,
+    "thead": 2,
+    "tbody": 3,
+    "tr": 3,
+    "tfoot": 4,
+}
+
+
+def serialize_visual_tree(
+    root_node: _DOMNode,
+    rules: list | tuple,
+    include_media: bool,
+    respect_order: bool,
+    skip_hidden: bool,
+    i18n_map: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Serialize DOM text in computed visual order (flex order, grid tracks, table sections)."""
+    fused: list[str] = []
+    compact: list[str] = []
+
+    def expand_children(container: _DOMNode) -> list[tuple[str, object, dict[str, object]]]:
+        items: list[tuple[str, object, dict[str, object]]] = []
+        for ch in container.children:
+            if isinstance(ch, str):
+                if ch:
+                    items.append(("text", ch, {}))
+            else:
+                st = compute_node_style(ch, rules, include_media)
+                if skip_hidden and _is_hidden_node(ch, st):
+                    continue
+                if respect_order and st.get("display") == "contents":
+                    items.extend(expand_children(ch))
+                else:
+                    items.append(("node", ch, st))
+        if not respect_order:
+            return items
+        if container.tag == "table":
+            meaningful = [
+                (idx, kind, obj, st)
+                for idx, (kind, obj, st) in enumerate(items)
+                if not (kind == "text" and isinstance(obj, str) and not obj.strip())
+            ]
+            meaningful.sort(
+                key=lambda x: (
+                    _TABLE_SECTION_ORDER.get(x[2].tag, 5) if isinstance(x[2], _DOMNode) else 5,
+                    x[0],
+                )
+            )
+            return [(k, o, s) for _, k, o, s in meaningful]
+
+        parent_st = compute_node_style(container, rules, include_media) if container.tag != "__root__" else {}
+        disp = str(parent_st.get("display", "")).lower()
+        is_flex = "flex" in disp
+        is_grid = "grid" in disp
+        if not (is_flex or is_grid):
+            return items
+
+        meaningful_items: list[list[object]] = []
+        for idx, (kind, obj, st) in enumerate(items):
+            if kind == "text" and isinstance(obj, str) and not obj.strip():
+                continue
+            raw_ord = st.get("order", 0)
+            ord_val = raw_ord if isinstance(raw_ord, int) else 0
+            raw_gr = st.get("grid-row")
+            gr = raw_gr if isinstance(raw_gr, int) else None
+            raw_gc = st.get("grid-column")
+            gc = raw_gc if isinstance(raw_gc, int) else None
+            meaningful_items.append([idx, kind, obj, st, ord_val, gr, gc])
+
+        if is_flex:
+            meaningful_items.sort(key=lambda x: (int(x[4]), int(x[0])))  # type: ignore[arg-type]
+            return [(m[1], m[2], m[3]) for m in meaningful_items]  # type: ignore[misc]
+
+        explicit_cols = [m[6] for m in meaningful_items if isinstance(m[6], int)]
+        parent_cols = parent_st.get("grid-cols")
+        ncols = parent_cols if isinstance(parent_cols, int) and parent_cols >= 1 else max([1, *explicit_cols])
+        occupied: set[tuple[int, int]] = set()
+        for m in meaningful_items:
+            if isinstance(m[5], int) and isinstance(m[6], int):
+                r, c = m[5], m[6]
+                ncols = max(ncols, c)
+                occupied.add((r, c))
+        for m in sorted(meaningful_items, key=lambda x: (int(x[4]), int(x[0]))):  # type: ignore[arg-type]
+            if isinstance(m[5], int) and m[6] is None:
+                r = m[5]
+                c = 1
+                while (r, c) in occupied:
+                    c += 1
+                m[6] = c
+                ncols = max(ncols, c)
+                occupied.add((r, c))
+        cur_r, cur_c = 1, 1
+        for m in sorted(meaningful_items, key=lambda x: (int(x[4]), int(x[0]))):  # type: ignore[arg-type]
+            if m[5] is None:
+                if isinstance(m[6], int):
+                    c = m[6]
+                    ncols = max(ncols, c)
+                    r = cur_r if c >= cur_c else cur_r + 1
+                    while (r, c) in occupied:
+                        r += 1
+                    m[5] = r
+                    occupied.add((r, c))
+                    cur_r, cur_c = r, c + 1
+                    if cur_c > ncols:
+                        cur_r += 1
+                        cur_c = 1
+                else:
+                    while (cur_r, cur_c) in occupied:
+                        cur_c += 1
+                        if cur_c > ncols:
+                            cur_r += 1
+                            cur_c = 1
+                    m[5], m[6] = cur_r, cur_c
+                    occupied.add((cur_r, cur_c))
+                    cur_c += 1
+                    if cur_c > ncols:
+                        cur_r += 1
+                        cur_c = 1
+        meaningful_items.sort(key=lambda x: (int(x[5]), int(x[6]), int(x[4]), int(x[0])))  # type: ignore[arg-type]
+        return [(m[1], m[2], m[3]) for m in meaningful_items]  # type: ignore[misc]
+
+    def walk(node: _DOMNode) -> None:
+        if i18n_map and node.tag != "__root__":
+            k_txt = node.attrs.get("data-i18n")
+            k_htm = node.attrs.get("data-i18n-html")
+            if k_txt and k_txt in i18n_map:
+                val = i18n_map[k_txt]
+                fused.append(val)
+                if val.strip():
+                    compact.append(val.strip())
+                return
+            if k_htm and k_htm in i18n_map:
+                val = re.sub(r"<[^>]+>", "", i18n_map[k_htm])
+                fused.append(val)
+                if val.strip():
+                    compact.append(val.strip())
+                return
+        for kind, obj, _ in expand_children(node):
+            if kind == "text" and isinstance(obj, str):
+                fused.append(obj)
+                if obj.strip():
+                    compact.append(obj.strip())
+            elif isinstance(obj, _DOMNode):
+                walk(obj)
+
+    walk(root_node)
+    return "".join(fused), "".join(compact)
+
+
 class _RenderedHTMLNormalizer(HTMLParser):
     def __init__(self, depth: int = 0) -> None:
         super().__init__(convert_charrefs=True)
@@ -1100,6 +1598,10 @@ class _RenderedHTMLNormalizer(HTMLParser):
         self.attr_lines: list[str] = []
         self.comment_lines: list[str] = []
         self.subtrees: list[str] = []
+        self.style_blocks: list[str] = []
+        self.inline_css_issues: list[str] = []
+        self.dom_root = _DOMNode("__root__", {})
+        self._dom_stack: list[_DOMNode] = [self.dom_root]
         self._tag_stack: list[tuple[str, bool]] = []
         self._raw_tag: str | None = None
         self._raw_chunks: list[str] = []
@@ -1118,11 +1620,21 @@ class _RenderedHTMLNormalizer(HTMLParser):
             self.attr_lines.append(f"{k}={v}")
             if "%" in v:
                 self.attr_lines.append(f"{k}={urllib.parse.unquote(v)}")
+            if k.lower() == "style":
+                clean_s = CSS_COMMENT_RE.sub("", unescape_css_literals(v))
+                self.inline_css_issues.extend(_check_css_safety(clean_s))
+                _, bad_vals = parse_style_decls(clean_s)
+                self.inline_css_issues.extend(f"non-literal CSS visual-order value ({bv})" for bv in bad_vals)
             if k.lower() == "srcdoc" and self.depth < 3:
                 self.subtrees.append(normalize_html_text(v, self.depth + 1))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
+        ad = {k.lower(): (v or "") for k, v in attrs}
+        node = _DOMNode(t, ad, parent=self._dom_stack[-1])
+        self._dom_stack[-1].children.append(node)
+        if t not in HTML_VOID_TAGS:
+            self._dom_stack.append(node)
         is_block = (t in HTML_BLOCK_TAGS) and not self._has_inline_display(attrs)
         self._tag_stack.append((t, is_block))
         if is_block:
@@ -1134,6 +1646,9 @@ class _RenderedHTMLNormalizer(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
+        ad = {k.lower(): (v or "") for k, v in attrs}
+        node = _DOMNode(t, ad, parent=self._dom_stack[-1])
+        self._dom_stack[-1].children.append(node)
         if (t in HTML_BLOCK_TAGS) and not self._has_inline_display(attrs):
             self.inline_parts.append("\n")
         self._handle_attrs(attrs)
@@ -1141,11 +1656,12 @@ class _RenderedHTMLNormalizer(HTMLParser):
     def _flush_raw_tag(self, tag_name: str) -> None:
         raw_body = "".join(self._raw_chunks)
         if tag_name == "script":
-            dec = unescape_js_literals(raw_body)
+            dec = fold_js_expressions(raw_body)
             self.subtrees.append(dec)
             if ("<" in dec or "&" in dec) and self.depth < 3:
                 self.subtrees.append(normalize_html_text(dec, self.depth + 1))
         elif tag_name == "style":
+            self.style_blocks.append(raw_body)
             self.subtrees.append(unescape_css_literals(raw_body))
         self._raw_tag = None
         self._raw_chunks = []
@@ -1160,6 +1676,10 @@ class _RenderedHTMLNormalizer(HTMLParser):
                 _, is_block = self._tag_stack[idx]
                 del self._tag_stack[idx:]
                 break
+        for idx in range(len(self._dom_stack) - 1, 0, -1):
+            if self._dom_stack[idx].tag == t:
+                del self._dom_stack[idx:]
+                break
         if is_block:
             self.inline_parts.append("\n")
 
@@ -1171,22 +1691,54 @@ class _RenderedHTMLNormalizer(HTMLParser):
         self.fused_parts.append(data)
         if data.strip():
             self.compact_parts.append(data.strip())
+        self._dom_stack[-1].children.append(data)
 
     def handle_comment(self, data: str) -> None:
         self.comment_lines.append(html.unescape(data))
 
 
-def normalize_html_text(text: str, depth: int = 0) -> str:
-    """Canonicalize rendered HTML/SVG text, attributes, comments, and scripts."""
+def normalize_html_text(
+    text: str,
+    depth: int = 0,
+    external_rules: list | tuple = (),
+    i18n_maps: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
+) -> str:
+    """Canonicalize rendered HTML/SVG text, CSS visual order, attributes, comments, and scripts."""
     parser = _RenderedHTMLNormalizer(depth=depth)
     parser.feed(text)
     parser.close()
     if parser._raw_tag is not None:
         parser._flush_raw_tag(parser._raw_tag)
+    all_rules: list = list(external_rules)
+    idx_base = len(all_rules)
+    for sb in parser.style_blocks:
+        s_rules, _, idx_base = parse_css_stylesheet(sb, start_idx=idx_base)
+        all_rules.extend(s_rules)
+
+    vis_dom_f, vis_dom_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=False, respect_order=False, skip_hidden=True)
+    vis_base_f, vis_base_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=False, respect_order=True, skip_hidden=True)
+    vis_all_f, vis_all_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=True, respect_order=True, skip_hidden=True)
+
+    extra_i18n: list[str] = []
+    if "data-i18n" in text and i18n_maps:
+        for imap in i18n_maps:
+            if not imap:
+                continue
+            ib_f, ib_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=False, respect_order=True, skip_hidden=True, i18n_map=imap)
+            ia_f, ia_c = serialize_visual_tree(parser.dom_root, all_rules, include_media=True, respect_order=True, skip_hidden=True, i18n_map=imap)
+            extra_i18n.extend([ib_f, ib_c, ia_f, ia_c])
+
     combined = "\n".join([
         "".join(parser.inline_parts),
         "".join(parser.fused_parts),
         "".join(parser.compact_parts),
+        vis_dom_f,
+        vis_dom_c,
+        vis_base_f,
+        vis_base_c,
+        vis_all_f,
+        vis_all_c,
+        *extra_i18n,
         "\n".join(parser.attr_lines),
         "\n".join(parser.comment_lines),
         *parser.subtrees,
@@ -1194,7 +1746,85 @@ def normalize_html_text(text: str, depth: int = 0) -> str:
     return INVISIBLE_FORMAT_RE.sub("", combined)
 
 
-def normalized_site_views(path: Path, text: str) -> list[str]:
+def check_site_visual_integrity(
+    rel: str,
+    path: Path,
+    text: str,
+    report: Report,
+    seen: set[tuple[str, str]],
+) -> None:
+    """Reject bidirectional controls and CSS/HTML layout constructs that obscure visual text order."""
+    def _emit(msg: str) -> None:
+        item = ("publish", f"{rel}: {msg} (section 13)")
+        if item not in seen:
+            seen.add(item)
+            report.add(*item)
+
+    if BIDI_CONTROL_RE.search(text):
+        _emit("bidirectional control character in published site/ asset")
+    suffix = path.suffix.lower()
+    if suffix == ".css":
+        _, issues, _ = parse_css_stylesheet(text)
+        for iss in issues:
+            _emit(iss)
+        return
+    if suffix in (".html", ".htm", ".xhtml", ".svg", ".xml"):
+        for rx, label in DISALLOWED_SITE_HTML_RE:
+            m = rx.search(text)
+            if m:
+                _emit(f"{label}: {m.group(0).strip()[:36]}")
+        parser = _RenderedHTMLNormalizer()
+        parser.feed(text)
+        parser.close()
+        if parser._raw_tag is not None:
+            parser._flush_raw_tag(parser._raw_tag)
+        for iss in parser.inline_css_issues:
+            _emit(iss)
+        for sb in parser.style_blocks:
+            _, issues, _ = parse_css_stylesheet(sb)
+            for iss in issues:
+                _emit(iss)
+
+
+def collect_site_context(root: Path) -> tuple[list, list[dict[str, str]]]:
+    """Collect site/ CSS rules and JS i18n string dictionaries for cross-file rendering."""
+    css_rules: list = []
+    idx = 0
+    first_map: dict[str, str] = {}
+    last_map: dict[str, str] = {}
+    kv_re = re.compile(
+        r"(?:([a-zA-Z_][a-zA-Z0-9_]*)|\"([^\"]+)\"|'([^']+)')\s*:\s*"
+        r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)')"
+    )
+    for path in iter_files(root):
+        rel = path.relative_to(root).as_posix()
+        if not rel.startswith("site/"):
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in (".css", ".js", ".mjs", ".cjs"):
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if suffix == ".css":
+            rules, _, idx = parse_css_stylesheet(text, start_idx=idx)
+            css_rules.extend(rules)
+        else:
+            dec = fold_js_expressions(text)
+            for m in kv_re.finditer(dec):
+                k = m.group(1) or m.group(2) or m.group(3)
+                v = m.group(4) if m.group(4) is not None else (m.group(5) or "")
+                if k not in first_map:
+                    first_map[k] = v
+                last_map[k] = v
+    i18n_maps = [m for m in (first_map, last_map) if m]
+    return css_rules, i18n_maps
+
+
+def normalized_site_views(
+    path: Path,
+    text: str,
+    external_rules: list | tuple = (),
+    i18n_maps: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
+) -> list[str]:
     """Build raw and decoded/rendered views of a deployed site/ text asset."""
     views: list[str] = []
 
@@ -1205,15 +1835,15 @@ def normalized_site_views(path: Path, text: str) -> list[str]:
     _add(text)
     stripped = INVISIBLE_FORMAT_RE.sub("", text)
     _add(stripped)
-    js_dec = INVISIBLE_FORMAT_RE.sub("", unescape_js_literals(text))
+    js_dec = INVISIBLE_FORMAT_RE.sub("", fold_js_expressions(text))
     _add(js_dec)
     suffix = path.suffix.lower()
     if suffix in (".css", ".html", ".htm", ".xhtml", ".svg"):
         _add(INVISIBLE_FORMAT_RE.sub("", unescape_css_literals(text)))
     if suffix in (".html", ".htm", ".xhtml", ".svg", ".xml") or "<" in js_dec or "&" in js_dec:
-        _add(normalize_html_text(text))
+        _add(normalize_html_text(text, external_rules=external_rules, i18n_maps=i18n_maps))
         if js_dec != text:
-            _add(normalize_html_text(js_dec))
+            _add(normalize_html_text(js_dec, external_rules=external_rules, i18n_maps=i18n_maps))
     return views
 
 
@@ -1308,6 +1938,7 @@ def _scan_leak_patterns(
 
 def check_leaks(root: Path, report: Report) -> None:
     site_path_patterns = [*LEAK_PATTERNS[:4], *SITE_LEAK_PATTERNS]
+    site_css_rules, site_i18n_maps = collect_site_context(root)
     for path in iter_files(root):
         rel = path.relative_to(root).as_posix()
         markdown = is_markdown(path)
@@ -1338,9 +1969,12 @@ def check_leaks(root: Path, report: Report) -> None:
                     continue
             elif status != "text" or site_text is None:
                 continue
+            check_site_visual_integrity(rel, path, site_text, report, seen_for_file)
             patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:4])
             patterns.extend(SITE_LEAK_PATTERNS)
-            for view in normalized_site_views(path, site_text):
+            for view in normalized_site_views(
+                path, site_text, external_rules=site_css_rules, i18n_maps=site_i18n_maps
+            ):
                 prose = blank_fenced_blocks(view) if markdown else view
                 masked = blank_code_spans(prose) if markdown else view
                 ctx = FileContext(

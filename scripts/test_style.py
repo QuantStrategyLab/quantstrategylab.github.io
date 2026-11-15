@@ -270,6 +270,27 @@ class LeakTest(CheckerTestCase):
             '</div>\n',
         )
         self.write(
+            "site/css-order-leak.html",
+            '<style>.row{display:flex}.a{order:2}.b{order:1}.c{order:3}</style>'
+            '<div class="row"><span class="a">operator</span>'
+            '<span class="b">/home/</span><span class="c">/prod/config</span></div>\n',
+        )
+        self.write(
+            "site/css-grid-leak.html",
+            '<div style="display:grid;grid-template-columns:1fr">'
+            '<span style="grid-row:2;grid-column:1">operator</span>'
+            '<span>/home/</span><span>/prod/config</span></div>\n',
+        )
+        self.write(
+            "site/css-hidden-sep.html",
+            '<style>.h{display:none}</style>'
+            '<span>/home/</span><span class="h">SAFE</span><span>operator/prod/config</span>\n',
+        )
+        self.write(
+            "site/css-reverse.html",
+            '<div style="display:flex;flex-direction:row-reverse"><span>a</span><span>b</span></div>\n',
+        )
+        self.write(
             "site/escaped-leak.js",
             'const p = "\\u002fhome\\u002foperator\\u002fprod\\u002fconfig";\n',
         )
@@ -364,6 +385,10 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/rendered-leak.html" in m and "personal subdomain" in m for m in msgs))
         self.assertTrue(any("site/css-inline-leak.html" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/css-flex-leak.html" in m and "internal hostname" in m for m in msgs))
+        self.assertTrue(any("site/css-order-leak.html" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/css-grid-leak.html" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/css-hidden-sep.html" in m and "absolute home path" in m for m in msgs))
+        self.assertTrue(any("site/css-reverse.html" in m and "reverse flex visual ordering" in m for m in msgs))
         self.assertTrue(any("site/escaped-leak.js" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/data-uri.html" in m and "embedded data URI asset" in m for m in msgs))
         self.assertTrue(any("site/actual-private-app.workers.dev/index.html" in m and "personal subdomain" in m for m in msgs))
