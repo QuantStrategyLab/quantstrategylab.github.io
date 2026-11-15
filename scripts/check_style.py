@@ -1153,6 +1153,7 @@ DISALLOWED_SITE_HTML_RE = [
         ),
         "SVG animation, reference, or masking element in site/",
     ),
+    (re.compile(r"(?i)<\s*(?:script|style)\b[^>]*/>"), "self-closing script or style tag in site/"),
 ]
 
 
@@ -1192,9 +1193,13 @@ def fold_js_expressions(text: str) -> str:
                 extras.append(decoded)
         except Exception:
             pass
-    for m in re.finditer(r"String\s*\.\s*from(?:CharCode|CodePoint)\s*\(([^)]+)\)", out):
+    for m in re.finditer(
+        r"String\s*\.\s*from(?:CharCode|CodePoint)\s*(?:\.\s*apply\s*\([^,]+,\s*\[([^\]]+)\]\s*\)|\(([^)]+)\))",
+        out,
+    ):
         chars: list[str] = []
-        for tok in m.group(1).split(","):
+        arg_list = m.group(1) if m.group(1) is not None else (m.group(2) or "")
+        for tok in arg_list.split(","):
             tok = tok.strip()
             try:
                 cp = int(tok, 0)
@@ -1299,7 +1304,15 @@ def parse_style_decls(
     props: dict[str, tuple[object, bool]] = {}
     invalid: list[str] = []
     raw_decls: dict[str, str] = {}
+    raw_imp: dict[str, bool] = {}
     small_box_dims: list[str] = []
+
+    def _set_prop(key: str, val: object, is_imp: bool) -> None:
+        prev = props.get(key)
+        if prev is not None and prev[1] and not is_imp:
+            return
+        props[key] = (val, is_imp)
+
     clean = CSS_COMMENT_RE.sub("", unescape_css_literals(decl_text))
     if "{" in clean or "}" in clean:
         invalid.append("nested CSS block inside declarations")
@@ -1317,38 +1330,40 @@ def parse_style_decls(
             continue
         if (k.startswith("--") or k in ("color", "fill")) and TRANSPARENT_COLOR_RE.search(v):
             invalid.append(f"transparent color hiding ({k})")
-        raw_decls[k] = v
+        if imp or not raw_imp.get(k, False):
+            raw_decls[k] = v
+            raw_imp[k] = imp
         if k == "display":
             if vl in {
                 "none", "contents", "block", "inline", "inline-block", "flex",
                 "inline-flex", "grid", "inline-grid", "list-item", "table", "table-row", "table-cell",
             }:
-                props["display"] = (vl, imp)
+                _set_prop("display", vl, imp)
             else:
                 invalid.append(f"display:{v[:24]}")
         elif k == "visibility":
             if vl in {"visible", "hidden", "collapse"}:
-                props["visibility"] = (vl, imp)
+                _set_prop("visibility", vl, imp)
             else:
                 invalid.append(f"visibility:{v[:24]}")
         elif k == "opacity":
             if re.match(r"^(?:0(?:\.0+)?|\.0+|1(?:\.0+)?|0?\.[2-9]\d*)$", vl):
-                props["opacity"] = ("0" if float(vl) == 0.0 else vl, imp)
+                _set_prop("opacity", "0" if float(vl) == 0.0 else vl, imp)
             else:
                 invalid.append(f"opacity:{v[:24]}")
         elif k == "position":
             if vl in {"static", "relative", "absolute"}:
-                props["position"] = (vl, imp)
+                _set_prop("position", vl, imp)
             else:
                 invalid.append(f"position:{v[:24]}")
         elif k == "clip":
             if vl == "auto":
-                props["clip"] = ("auto", imp)
+                _set_prop("clip", "auto", imp)
             elif re.match(
                 r"^rect\(\s*0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?\s*\)$",
                 vl,
             ):
-                props["clip"] = ("zero", imp)
+                _set_prop("clip", "zero", imp)
             else:
                 invalid.append(f"clip:{v[:24]}")
         elif k in ("animation", "transition"):
@@ -1370,13 +1385,13 @@ def parse_style_decls(
                     fs_unit = m_fs.group(2) or "px"
                     min_fs = 0.25 if fs_unit in ("em", "rem", "ch") else 4.0
                     if fs_num == 0.0:
-                        props["font-size"] = ("0", imp)
+                        _set_prop("font-size", "0", imp)
                     elif fs_num < 0.0 or fs_num < min_fs:
                         invalid.append(f"font-size:{v[:24]}")
                     else:
-                        props["font-size"] = (vl, imp)
+                        _set_prop("font-size", vl, imp)
                 else:
-                    props["font-size"] = (vl, imp)
+                    _set_prop("font-size", vl, imp)
         elif k == "line-height":
             if CSS_DYNAMIC_FUNC_RE.search(vl):
                 invalid.append(f"line-height:{v[:24]}")
@@ -1392,6 +1407,8 @@ def parse_style_decls(
                     stripped_v,
                 ):
                     invalid.append(f"font:{v[:24]}")
+                else:
+                    _set_prop("font-size", "16px", imp)
         elif k == "letter-spacing":
             if CSS_DYNAMIC_FUNC_RE.search(vl):
                 invalid.append(f"letter-spacing:{v[:24]}")
@@ -1427,17 +1444,17 @@ def parse_style_decls(
         elif k == "order":
             m = re.match(r"^[+-]?\d+$", v)
             if m:
-                props["order"] = (int(m.group(0)), imp)
+                _set_prop("order", int(m.group(0)), imp)
             else:
                 invalid.append(f"order:{v[:24]}")
         elif k in ("grid-row", "grid-row-start", "grid-column", "grid-column-start"):
             prop_key = "grid-row" if k.startswith("grid-row") else "grid-column"
             if vl == "auto":
-                props[prop_key] = (None, imp)
+                _set_prop(prop_key, None, imp)
             else:
                 m = re.match(r"^(\d+)(?:\s*/\s*(\d+))?$", v)
                 if m and int(m.group(1)) >= 1 and (m.group(2) is None or int(m.group(2)) > int(m.group(1))):
-                    props[prop_key] = (int(m.group(1)), imp)
+                    _set_prop(prop_key, int(m.group(1)), imp)
                 else:
                     invalid.append(f"{k}:{v[:24]}")
         elif k == "grid-template-columns":
@@ -1445,7 +1462,7 @@ def parse_style_decls(
             if cols == -1:
                 invalid.append(f"grid-template-columns:{v[:24]}")
             elif cols is not None:
-                props["grid-cols"] = (cols, imp)
+                _set_prop("grid-cols", cols, imp)
     has_zero_clip = props.get("clip", (None, False))[0] == "zero"
     if props.get("position", (None, False))[0] == "absolute" and not has_zero_clip:
         invalid.append("position:absolute without clip:rect(0,0,0,0)")
@@ -1900,9 +1917,10 @@ def serialize_visual_tree(
 
 
 class _RenderedHTMLNormalizer(HTMLParser):
-    def __init__(self, depth: int = 0) -> None:
+    def __init__(self, depth: int = 0, xml_mode: bool = False) -> None:
         super().__init__(convert_charrefs=True)
         self.depth = depth
+        self.xml_mode = xml_mode
         self.inline_parts: list[str] = []
         self.fused_parts: list[str] = []
         self.compact_parts: list[str] = []
@@ -1978,6 +1996,12 @@ class _RenderedHTMLNormalizer(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
+        in_svg = self.xml_mode or any(st_tag == "svg" for st_tag, _ in self._tag_stack)
+        if t in ("script", "style") or (not in_svg and t not in HTML_VOID_TAGS):
+            if t in ("script", "style"):
+                self.set_cdata_mode(t)
+            self.handle_starttag(tag, attrs)
+            return
         ad = {k.lower(): (v or "") for k, v in attrs}
         node = _DOMNode(t, ad, parent=self._dom_stack[-1])
         self._dom_stack[-1].children.append(node)
@@ -2097,7 +2121,10 @@ def normalize_html_text(
     i18n_maps: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
 ) -> str:
     """Canonicalize rendered HTML/SVG text, CSS visual order, attributes, comments, and scripts."""
-    parser = _RenderedHTMLNormalizer(depth=depth)
+    parser = _RenderedHTMLNormalizer(
+        depth=depth,
+        xml_mode=Path(page_rel).suffix.lower() in (".svg", ".xml", ".xhtml"),
+    )
     parser.feed(text)
     parser.close()
     if parser._raw_tag is not None:
@@ -2189,7 +2216,7 @@ def check_site_visual_integrity(
             m = rx.search(text)
             if m:
                 _emit(f"{label}: {m.group(0).strip()[:36]}")
-        parser = _RenderedHTMLNormalizer()
+        parser = _RenderedHTMLNormalizer(xml_mode=suffix in (".svg", ".xml", ".xhtml"))
         parser.feed(text)
         parser.close()
         if parser._raw_tag is not None:
@@ -2212,8 +2239,10 @@ def check_site_visual_integrity(
                 actual_sha = (script_hashes_by_rel or {}).get(resolved_src) if resolved_src else None
                 if resolved_src is None or expected_sha is None or actual_sha != expected_sha:
                     _emit(f"unapproved executable script src in site/ ({src[:36]})")
-            if raw_body.strip():
-                body_sha = hashlib.sha256(raw_body.encode("utf-8")).hexdigest()
+                if raw_body.strip():
+                    _emit("unapproved executable inline script in site/")
+            else:
+                body_sha = hashlib.sha256(raw_body.encode("utf-8")).hexdigest() if raw_body.strip() else ""
                 if body_sha not in APPROVED_SITE_INLINE_SCRIPTS:
                     _emit("unapproved executable inline script in site/")
 
@@ -2281,6 +2310,17 @@ def normalized_site_views(
         _add(normalize_html_text(text, page_rel=page_rel, css_by_rel=css_by_rel, i18n_maps=i18n_maps))
         if js_dec != text:
             _add(normalize_html_text(js_dec, page_rel=page_rel, css_by_rel=css_by_rel, i18n_maps=i18n_maps))
+    for base_view in list(views):
+        cur = base_view
+        for _ in range(2):
+            if "%" not in cur:
+                break
+            unq = INVISIBLE_FORMAT_RE.sub("", urllib.parse.unquote(cur))
+            if unq == cur:
+                break
+            _add(unq)
+            cur = unq
+        _add(INVISIBLE_FORMAT_RE.sub("", html.unescape(base_view)))
     return views
 
 
@@ -2329,7 +2369,7 @@ IDENTIFIER_LEAK_PATTERNS = [
     ),
     (
         re.compile(
-            r"""(?i)\b(?:aws[-_]?account[-_]?id|account[-_]?id|tenant[-_]?id|subscription[-_]?id)\b"""
+            r"""(?i)\b(?:[a-z0-9]+[-_])*(?:aws[-_]?account(?:[-_]?id)?|account[-_]?id|tenant[-_]?id|subscription[-_]?id|project[-_]?number)\b"""
             r"""(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{12})(?:\\?["'])?(?![0-9a-f-])"""
         ),
         "publish",
@@ -2386,10 +2426,15 @@ def check_leaks(root: Path, report: Report) -> None:
             seen_for_file: set[tuple[str, str]] = set()
             site_rel_path = "/" + rel[len("site/"):]
             path_views = [site_rel_path]
-            if "%" in site_rel_path:
-                decoded_rel_path = urllib.parse.unquote(site_rel_path)
-                if decoded_rel_path != site_rel_path:
-                    path_views.append(decoded_rel_path)
+            cur_pv = site_rel_path
+            for _ in range(2):
+                if "%" not in cur_pv:
+                    break
+                decoded_rel_path = urllib.parse.unquote(cur_pv)
+                if decoded_rel_path == cur_pv:
+                    break
+                path_views.append(decoded_rel_path)
+                cur_pv = decoded_rel_path
             for pv in path_views:
                 path_ctx = FileContext(url_spans=[], prose=pv, masked=pv)
                 _scan_leak_patterns(rel, pv, site_path_patterns, path_ctx, report, seen_for_file)
@@ -2443,25 +2488,47 @@ def check_leaks(root: Path, report: Report) -> None:
                 )
                 _scan_leak_patterns(rel, view, patterns, ctx, report, seen_for_file)
             continue
-        elif markdown:
+        if markdown:
             text = path.read_text(encoding="utf-8", errors="ignore")
+            repo_patterns = [*LEAK_PATTERNS, *IDENTIFIER_LEAK_PATTERNS]
         else:
-            continue
-        md_patterns = [*LEAK_PATTERNS, *IDENTIFIER_LEAK_PATTERNS]
-        seen_md: set[tuple[str, str]] = set()
-        md_views = [text]
-        unescaped_md = html.unescape(text)
-        if unescaped_md != text:
-            md_views.append(unescaped_md)
-        for md_view in md_views:
-            prose = blank_fenced_blocks(md_view)
-            masked = blank_code_spans(prose)
+            if rel == "scripts/test_style.py":
+                continue
+            tx_status, decoded_txt = _decode_site_text(path.read_bytes())
+            if tx_status != "text" or not decoded_txt:
+                continue
+            text = (
+                re.sub(r'ipaddress\.ip_network\("[^"]+"\)', 'ipaddress.ip_network("")', decoded_txt)
+                if rel == "scripts/check_style.py"
+                else decoded_txt
+            )
+            repo_patterns = [*LEAK_PATTERNS[:4], *IDENTIFIER_LEAK_PATTERNS]
+        seen_repo: set[tuple[str, str]] = set()
+        repo_views: list[str] = []
+        for base_cand in (text, html.unescape(text), fold_js_expressions(text)):
+            cand = INVISIBLE_FORMAT_RE.sub("", base_cand)
+            if cand and cand not in repo_views:
+                repo_views.append(cand)
+        for bv in list(repo_views):
+            cur = bv
+            for _ in range(2):
+                if "%" not in cur:
+                    break
+                unq = INVISIBLE_FORMAT_RE.sub("", urllib.parse.unquote(cur))
+                if unq == cur:
+                    break
+                if unq not in repo_views:
+                    repo_views.append(unq)
+                cur = unq
+        for rv in repo_views:
+            prose = blank_fenced_blocks(rv) if markdown else rv
+            masked = blank_code_spans(prose) if markdown else rv
             ctx = FileContext(
-                url_spans=[(m.start(), m.end()) for m in URL_TOKEN.finditer(md_view)],
+                url_spans=[(m.start(), m.end()) for m in URL_TOKEN.finditer(rv)],
                 prose=prose,
                 masked=masked,
             )
-            _scan_leak_patterns(rel, md_view, md_patterns, ctx, report, seen_md)
+            _scan_leak_patterns(rel, rv, repo_patterns, ctx, report, seen_repo)
 
 
 def matching_internal_note_pattern(rel: str) -> str | None:

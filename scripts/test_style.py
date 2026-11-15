@@ -448,6 +448,19 @@ class LeakTest(CheckerTestCase):
             '<div style="display:flex"><span class="a">/prod/config</span><span>/home/operator</span></div>\n',
         )
         self.write("site/stmt-desync.css", "@layer reset; .x { order: 2; }\n")
+        self.write(
+            "site/self-closing-script.html",
+            '<script/>const p = String.fromCharCode.apply(null, [47,104,111,109,101,47,111,112,101,114,97,116,111,114]);</script>\n',
+        )
+        self.write(
+            "site/important-dup.html",
+            '<style>.h{display:none!important;display:block}</style>\n'
+            '<p>actual-private-app.work<span class="h">SAFE</span>ers.dev</p>\n',
+        )
+        self.write(
+            "site/percent-config.json",
+            '{"config":"%2Fhome%2Foperator%2Fprod%2Fconfig","url":"https%3A%2F%2Factual-private-app.workers.dev"}\n',
+        )
 
         extra_report = self.report()
         check_style.check_leaks(self.root, extra_report)
@@ -469,6 +482,41 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/animation-order.css" in m and "CSS @keyframes animation" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/animation-order.css" in m and "animation:" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/stmt-desync.css" in m and "unmodeled CSS statement" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/self-closing-script.html" in m and "self-closing script or style tag" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/self-closing-script.html" in m and "unapproved executable inline script" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/self-closing-script.html" in m and "absolute home path" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/important-dup.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/percent-config.json" in m and "absolute home path" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/percent-config.json" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+
+    def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
+        self.write(
+            ".github/workflows/ci.yml",
+            "env:\n"
+            "  CONFIG: /home/<user>/cfg\n"
+            '  ACCOUNT_ID: "000000000000"\n'
+            "  BUCKET: gs://<bucket>/artifacts\n"
+            "  HOST: ${{ vars.DEPLOY_HOST }}\n",
+        )
+        clean = self.report()
+        check_style.check_leaks(self.root, clean)
+        self.assertEqual(clean.findings, [])
+
+        self.write(
+            ".github/workflows/review-check.yml",
+            "env:\n"
+            "  CONFIG: /home/operator/prod/config\n"
+            '  ACCOUNT_ID: "123456789012"\n'
+            "  BUCKET: gs://corp-quant-bucket\n"
+            "  HOST: db-primary.ops.internal\n",
+        )
+        dirty = self.report()
+        check_style.check_leaks(self.root, dirty)
+        msgs = [f"{cat}: {detail}" for cat, detail in dirty.findings]
+        self.assertTrue(any("review-check.yml" in m and "absolute home path" in m for m in msgs), msgs)
+        self.assertTrue(any("review-check.yml" in m and "account identifier" in m for m in msgs), msgs)
+        self.assertTrue(any("review-check.yml" in m and "non-placeholder bucket" in m for m in msgs), msgs)
+        self.assertTrue(any("review-check.yml" in m and "internal hostname" in m for m in msgs), msgs)
 
     def test_public_markdown_scans_account_and_internal_host_identifiers(self):
         self.write(
