@@ -174,6 +174,27 @@ class LeakTest(CheckerTestCase):
         path_found = self.findings("```bash\ncat /home/operator/prod/config\n```\n")
         self.assertTrue(any("absolute home path" in m for m in path_found))
 
+    def test_windows_paths_are_reported_while_placeholders_pass(self):
+        for clean in (
+            r"Config lives in `C:\Users\your-user\config.yaml`." + "\n",
+            r"Template path `C:\Users\<user>\config.yaml`." + "\n",
+            r"Env path `C:\Users\%USERNAME%\config.yaml`." + "\n",
+            r"Sample dir `C:\example\config.yaml`." + "\n",
+            r"Share `\\<server>\<share>\config.yaml`." + "\n",
+            r"Sample share `\\example-nas\share\config.yaml`." + "\n",
+        ):
+            with self.subTest(clean=clean):
+                self.assertEqual(self.findings(clean), [])
+        for dirty in (
+            r"Leaked `C:\Users\operator\prod\config.yaml`." + "\n",
+            r"Leaked `D:\deploy\example\secrets.yaml`." + "\n",
+            r"Share `\\corp-files\ops\config.yaml`." + "\n",
+            "Posix UNC `//corp-files/ops/config.yaml`.\n",
+        ):
+            with self.subTest(dirty=dirty):
+                found = self.findings(dirty)
+                self.assertTrue(any("Windows deployment path" in m for m in found), found)
+
     def test_deployed_site_text_assets_are_scanned_for_identifier_leaks(self):
         import pathlib
         import struct
@@ -203,7 +224,8 @@ class LeakTest(CheckerTestCase):
         self.write(
             "site/assets/styles.css",
             "a::before { content: ''; }\n"
-            "/* example 192.0.2.1 2001:db8::1 your-host.internal arn:aws:iam::000000000000:role/example your-sa@example.iam.gserviceaccount.com */\n",
+            r"/* example 192.0.2.1 2001:db8::1 your-host.internal arn:aws:iam::000000000000:role/example your-sa@example.iam.gserviceaccount.com C:\Users\your-user\config.yaml \\example-nas\share\cfg.yaml */"
+            "\n",
         )
         self.write("site/clean.json", '{"account_id": "000000000000"}\n')
         self.write("site/YOUR_SUBDOMAIN.workers.dev/index.html", "<p>placeholder path</p>\n")
@@ -220,7 +242,9 @@ class LeakTest(CheckerTestCase):
             "db_host: db-primary.ops.internal\n"
             "role: arn:aws:iam::123456789012:role/site-publisher\n"
             "sa: deployer@quant-prod-42.iam.gserviceaccount.com\n"
-            "account_id: '123456789012'\n",
+            "account_id: '123456789012'\n"
+            r"win_cfg: 'C:\Users\operator\prod\config.yaml'" + "\n"
+            r"unc_cfg: '\\corp-files\ops\config.yaml'" + "\n",
         )
         self.write(
             "site/runtime-config.json",
@@ -271,6 +295,17 @@ class LeakTest(CheckerTestCase):
             tampered.extend(png_chunk(ctype, cdata))
             pos += 12 + clen
         (self.root / "site/landing-light-512.png").write_bytes(bytes(tampered))
+        iend_src = (repo_root / "site/landing-light-apple-touch-180.png").read_bytes()
+        iend_out = bytearray(b"\x89PNG\r\n\x1a\n")
+        ipos = 8
+        while ipos < len(iend_src):
+            clen, ctype = struct.unpack(">I4s", iend_src[ipos:ipos + 8])
+            cdata = iend_src[ipos + 8:ipos + 8 + clen]
+            if ctype == b"IEND":
+                cdata = b"/home/operator/prod/config actual-private-app.workers.dev"
+            iend_out.extend(png_chunk(ctype, cdata))
+            ipos += 12 + clen
+        (self.root / "site/landing-light-apple-touch-180.png").write_bytes(bytes(iend_out))
         (self.root / "site/leak-meta.png").write_bytes(
             make_png(
                 png_chunk(b"tEXt", b"Comment\x00deploy /home/operator/prod/config http://10.23.45.67"),
@@ -303,6 +338,8 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/unapproved.ico" in m and "unapproved or uninspected raster asset" in m for m in msgs))
         self.assertTrue(any("site/landing-light-192.png" in m and "unapproved or uninspected raster asset" in m for m in msgs))
         self.assertTrue(any("site/landing-light-512.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertTrue(any("site/landing-light-apple-touch-180.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertEqual(sum(1 for m in msgs if "site/runtime-config.yaml" in m and "Windows deployment path" in m), 2)
         self.assertTrue(any("site/release.pdf" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/bundle.zip" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/corrupt.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))

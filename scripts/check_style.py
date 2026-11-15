@@ -172,6 +172,11 @@ PLACEHOLDER_HOME_USER = re.compile(
     r"^/(?:Users|home)/(?:<[^>]+>|\{[^}]+\}|\$[A-Za-z_]\w*|(?:your|my|example|sample|placeholder)(?:[-_]\w+)?)(?:/|$)",
     re.IGNORECASE,
 )
+PLACEHOLDER_PATH_SEG = re.compile(
+    r"^(?:<[^>]+>|\{[^}]+\}|\$[A-Za-z_]\w*|%[A-Za-z_]\w*%|\.\.\."
+    r"|(?:your|my|example|sample|placeholder)(?:[-_.]\w+)?)$",
+    re.IGNORECASE,
+)
 
 
 def home_path_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
@@ -179,6 +184,27 @@ def home_path_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
     if any(start <= match.start() < end for start, end in ctx.url_spans):
         return False
     return not PLACEHOLDER_HOME_USER.search(match.group(0))
+
+
+def windows_path_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
+    """Reject Windows drive-letter and UNC paths while allowing explicit placeholders."""
+    raw = match.group(0).rstrip(".,;:")
+    if "\\" not in raw and any(start <= match.start() < end for start, end in ctx.url_spans):
+        return False
+    if raw.startswith(("\\\\", "//")):
+        parts = [p for p in re.split(r"[\\/]+", raw) if p]
+        if not parts:
+            return False
+        return not PLACEHOLDER_PATH_SEG.match(parts[0])
+    rest = re.sub(r"^[A-Za-z]:[\\/]+", "", raw)
+    segs = [s for s in re.split(r"[\\/]+", rest) if s]
+    if not segs:
+        return False
+    if segs[0].lower() == "users":
+        if len(segs) < 2:
+            return not bool(re.match(r"^(?:<[^>]+>|\{[^}]+\})", text[match.end():]))
+        return not PLACEHOLDER_PATH_SEG.match(segs[1])
+    return not PLACEHOLDER_PATH_SEG.match(segs[0])
 
 
 def hex_is_prose(text: str, match: re.Match, ctx: FileContext) -> bool:
@@ -223,6 +249,12 @@ def hex_is_prose(text: str, match: re.Match, ctx: FileContext) -> bool:
 LEAK_PATTERNS = [
     (re.compile(r"(?<![\w.])/(?:Users|home)/[^\s`)\]\"'<>|]{2,}"),
      "paths", "absolute home path (section 13)", home_path_is_real),
+    (re.compile(
+        r"(?:(?<![A-Za-z0-9_])[A-Za-z]:(?:\\+|/)[^\s`)\]\"'<>|]{2,}"
+        r"|(?<![:/\\A-Za-z0-9_])(?:\\\\(?:<[^>]+>|\{[^}]+\}|[A-Za-z0-9.$%_-]+)\\+(?:<[^>]+>|\{[^}]+\}|[A-Za-z0-9$.%_-]+)(?:\\+[^\s`)\]\"'<>|]*)*"
+        r"|//(?:<[^>]+>|\{[^}]+\}|[A-Za-z0-9$%_-]+)/(?:<[^>]+>|\{[^}]+\}|[A-Za-z0-9$.%_-]+)(?:/[^\s`)\]\"'<>|]*)*))"
+     ),
+     "paths", "Windows deployment path (section 13)", windows_path_is_real),
     (re.compile(r"\bgs://[^\s`)\]\"'<>]+"),
      "content", "non-placeholder bucket (section 13)", bucket_is_real),
     (re.compile(r"\b[\w-]+\.workers\.dev\b"),
@@ -809,6 +841,8 @@ def inspect_png_asset(
         if ctype == b"IHDR":
             return None
         if ctype == b"IEND":
+            if clen != 0:
+                return None
             seen_iend = True
             break
         if ctype == b"IDAT":
@@ -1265,7 +1299,7 @@ def _scan_leak_patterns(
 
 
 def check_leaks(root: Path, report: Report) -> None:
-    site_path_patterns = [*LEAK_PATTERNS[:3], *SITE_LEAK_PATTERNS]
+    site_path_patterns = [*LEAK_PATTERNS[:4], *SITE_LEAK_PATTERNS]
     for path in iter_files(root):
         rel = path.relative_to(root).as_posix()
         markdown = is_markdown(path)
@@ -1296,7 +1330,7 @@ def check_leaks(root: Path, report: Report) -> None:
                     continue
             elif status != "text" or site_text is None:
                 continue
-            patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:3])
+            patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:4])
             patterns.extend(SITE_LEAK_PATTERNS)
             for view in normalized_site_views(path, site_text):
                 prose = blank_fenced_blocks(view) if markdown else view
