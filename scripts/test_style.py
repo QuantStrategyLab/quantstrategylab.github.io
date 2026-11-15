@@ -161,17 +161,18 @@ class LeakTest(CheckerTestCase):
         found = self.findings("Open https://ops-portal.workers.dev/status.\n")
         self.assertTrue(any("personal subdomain" in m for m in found))
 
-    def test_subdomain_in_a_fenced_block_is_an_example(self):
-        # The guide shows forbidden shapes inside fenced blocks. Installing a
-        # predicate on the rule must not start reporting those examples, or a
-        # narrowing fix silently widens what blocks.
-        text = (
-            "Do not publish a real host:\n\n"
-            "```markdown\n"
-            "Do not publish https://demo.workers.dev as a real host.\n"
-            "```\n"
+    def test_fenced_real_subdomain_and_home_path_are_reported_while_placeholders_pass(self):
+        self.assertEqual(
+            self.findings(
+                "```bash\ncurl https://YOUR_SUBDOMAIN.workers.dev\ncat /home/your-user/config\n```\n"
+                "```bash\ncurl https://example-portal.workers.dev\n```\n"
+            ),
+            [],
         )
-        self.assertEqual(self.findings(text), [])
+        sub_found = self.findings("```bash\ncurl https://ops-portal.workers.dev\n```\n")
+        self.assertTrue(any("personal subdomain" in m for m in sub_found))
+        path_found = self.findings("```bash\ncat /home/operator/prod/config\n```\n")
+        self.assertTrue(any("absolute home path" in m for m in path_found))
 
     def test_sha_in_url_is_not_reported(self):
         text = (
@@ -582,15 +583,37 @@ class GitVisibilityTest(CheckerTestCase):
         self.write("docs/changes/task/change-card.md", "# Card\n")
         self.write("docs/plans/draft.md", "# Draft\n")
         self.write("docs/acceptance-policy.md", "# Policy\n")
+        self.write("deployment-audit.md", "# Audit\n")
+        self.write("handoff.md", "# Handoff\n")
+        self.write("ops-notes/rollout.md", "# Rollout\n")
+        self.write(".codex/plan.md", "# Plan\n")
+        self.write("site/release.internal.md", "# Release\n")
 
         code, output = self.run_main()
         self.assertEqual(code, 0, msg=output)
 
-        self.git("add", "-f", "docs/changes/task/change-card.md", "docs/acceptance-policy.md")
+        self.git(
+            "add", "-f",
+            "docs/changes/task/change-card.md",
+            "docs/acceptance-policy.md",
+            "deployment-audit.md",
+            "handoff.md",
+            "ops-notes/rollout.md",
+            ".codex/plan.md",
+            "site/release.internal.md",
+        )
         blocked_code, blocked_output = self.run_main()
         self.assertEqual(blocked_code, 1, msg=blocked_output)
-        self.assertIn("docs/changes/task/change-card.md", blocked_output)
-        self.assertIn("docs/acceptance-policy.md", blocked_output)
+        for blocked_path in (
+            "docs/changes/task/change-card.md",
+            "docs/acceptance-policy.md",
+            "deployment-audit.md",
+            "handoff.md",
+            "ops-notes/rollout.md",
+            ".codex/plan.md",
+            "site/release.internal.md",
+        ):
+            self.assertIn(blocked_path, blocked_output)
 
 
 if __name__ == "__main__":

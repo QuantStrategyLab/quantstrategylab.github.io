@@ -30,6 +30,7 @@ Exit code 0 when nothing in the blocking set is found.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import re
 import subprocess
 import sys
@@ -155,18 +156,23 @@ def subdomain_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
     """A placeholder subdomain is the form section 13 asks for, not a leak.
 
     What survives this predicate is a subdomain that was actually deployed,
-    which is the thing the rule is about.
-
-    The fenced-block exemption is repeated here because `check_leaks` only
-    applies it to patterns without a predicate. Without this line, installing
-    the predicate would make an example that shows what to avoid start
-    reporting — a wider blocking set than the rule had before, which is not
-    what a narrowing fix should do.
+    including inside fenced command or config examples.
     """
-    if not ctx.prose[match.start():match.end()].strip():
-        return False
     subdomain = match.group(0)[: -len(".workers.dev")]
     return not PLACEHOLDER_SUBDOMAIN.search(subdomain.lower())
+
+
+PLACEHOLDER_HOME_USER = re.compile(
+    r"^/(?:Users|home)/(?:<[^>]+>|\{[^}]+\}|\$[A-Za-z_]\w*|(?:your|my|example|sample|placeholder)(?:[-_]\w+)?)(?:/|$)",
+    re.IGNORECASE,
+)
+
+
+def home_path_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
+    """Reject workstation home paths in prose and fenced examples while allowing placeholders."""
+    if any(start <= match.start() < end for start, end in ctx.url_spans):
+        return False
+    return not PLACEHOLDER_HOME_USER.search(match.group(0))
 
 
 def hex_is_prose(text: str, match: re.Match, ctx: FileContext) -> bool:
@@ -210,7 +216,7 @@ def hex_is_prose(text: str, match: re.Match, ctx: FileContext) -> bool:
 # the same as having no rule: the report gets scrolled past.
 LEAK_PATTERNS = [
     (re.compile(r"(?<![\w.])/(?:Users|home)/[^\s`)\]\"'<>|]{2,}"),
-     "paths", "absolute home path (section 13)", None),
+     "paths", "absolute home path (section 13)", home_path_is_real),
     (re.compile(r"\bgs://[^\s`)\]\"'<>]+"),
      "content", "non-placeholder bucket (section 13)", bucket_is_real),
     (re.compile(r"\b[\w-]+\.workers\.dev\b"),
@@ -688,6 +694,23 @@ def check_leaks(root: Path, report: Report) -> None:
                 report.add(category, f"{rel}: {label}: {match.group(0)[:40]}")
 
 
+def matching_internal_note_pattern(rel: str) -> str | None:
+    """Return the matching internal-note .gitignore pattern for a Git-visible path, if any."""
+    name = Path(rel).name
+    for pattern in INTERNAL_NOTE_GITIGNORE:
+        if pattern == "docs/acceptance-policy.md":
+            continue
+        if pattern.endswith("/"):
+            if rel.startswith(pattern) or f"/{pattern}" in rel:
+                return pattern
+        elif "/" in pattern:
+            if rel == pattern or rel.endswith("/" + pattern):
+                return pattern
+        elif fnmatch.fnmatchcase(name, pattern):
+            return pattern
+    return None
+
+
 def check_internal_paths(root: Path, report: Report) -> None:
     gitignore = root / ".gitignore"
     text = gitignore.read_text(encoding="utf-8", errors="ignore") if gitignore.exists() else ""
@@ -716,12 +739,16 @@ def check_internal_paths(root: Path, report: Report) -> None:
         )
 
     for path in iter_files(root):
-        if not is_markdown(path):
-            continue
         rel = path.relative_to(root).as_posix()
+        if rel == "docs/acceptance-policy.md":
+            continue
         if INTERNAL_NOTE_DIRS.search(rel):
             report.add("content", f"{rel}: plan/handoff directory in a public repo (section 5)")
-        if re.search(r"(^|/)(out|output)/[^/]+/", rel):
+        else:
+            matched = matching_internal_note_pattern(rel)
+            if matched is not None:
+                report.add("hygiene", f"{rel}: tracked internal note matching {matched} (section 6)")
+        if is_markdown(path) and re.search(r"(^|/)(out|output)/[^/]+/", rel):
             report.add("content", f"{rel}: committed output directory (section 5)")
 
 
