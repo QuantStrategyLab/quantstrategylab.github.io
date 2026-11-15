@@ -193,7 +193,12 @@ class LeakTest(CheckerTestCase):
 
         clean_png = make_png()
         self.write("site/index.html", '<a href="https://YOUR_SUBDOMAIN.workers.dev">docs</a>\n')
-        self.write("site/assets/styles.css", "a::before { content: ''; }\n/* example 192.0.2.1 2001:db8::1 */\n")
+        self.write(
+            "site/assets/styles.css",
+            "a::before { content: ''; }\n"
+            "/* example 192.0.2.1 2001:db8::1 your-host.internal arn:aws:iam::000000000000:role/example your-sa@example.iam.gserviceaccount.com */\n",
+        )
+        self.write("site/YOUR_SUBDOMAIN.workers.dev/index.html", "<p>placeholder path</p>\n")
         (self.root / "site/logo.png").write_bytes(clean_png)
         (self.root / "site/favicon.ico").write_bytes(make_ico(clean_png))
         clean_report = self.report()
@@ -203,8 +208,14 @@ class LeakTest(CheckerTestCase):
         self.write(
             "site/runtime-config.yaml",
             "config_dir: /home/operator/prod/config\n"
-            "endpoint: https://actual-private-app.workers.dev\n",
+            "endpoint: https://actual-private-app.workers.dev\n"
+            "db_host: db-primary.ops.internal\n"
+            "role: arn:aws:iam::123456789012:role/site-publisher\n"
+            "sa: deployer@quant-prod-42.iam.gserviceaccount.com\n"
+            "account_id: '123456789012'\n",
         )
+        self.write("site/actual-private-app.workers.dev/index.html", "<p>benign page content</p>\n")
+        self.write("site/db-primary.ops.internal/cfg.html", "<p>benign internal path</p>\n")
         self.write(
             "site/assets/app.js.map",
             '{"sourceRoot":"gs://actual-prod-bucket/maps"}\n',
@@ -249,6 +260,10 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/release.pdf" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/bundle.zip" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/corrupt.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertTrue(any("site/runtime-config.yaml" in m and "internal hostname" in m for m in msgs))
+        self.assertEqual(sum(1 for m in msgs if "site/runtime-config.yaml" in m and "account identifier" in m), 3)
+        self.assertTrue(any("site/actual-private-app.workers.dev/index.html" in m and "personal subdomain" in m for m in msgs))
+        self.assertTrue(any("site/db-primary.ops.internal/cfg.html" in m and "internal hostname" in m for m in msgs))
 
     def test_sha_in_url_is_not_reported(self):
         text = (

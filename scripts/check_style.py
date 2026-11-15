@@ -876,6 +876,28 @@ def ipv6_is_private(text: str, match: re.Match, ctx: FileContext) -> bool:
     return any(addr in net for net in INTERNAL_IPV6_NETWORKS)
 
 
+def internal_host_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
+    host = match.group(0).lower()
+    if host in {"localhost.local", "localhost.localdomain"}:
+        return False
+    return not any(PLACEHOLDER_SUBDOMAIN.search(label) for label in host.split("."))
+
+
+def arn_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
+    acct = match.group(1)
+    return len(set(acct)) > 1
+
+
+def service_account_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
+    user, proj = match.group(1).lower(), match.group(2).lower()
+    return not (PLACEHOLDER_SUBDOMAIN.search(user) or PLACEHOLDER_SUBDOMAIN.search(proj))
+
+
+def account_field_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
+    val = match.group(1).lower().replace("-", "")
+    return len(set(val)) > 1
+
+
 SITE_LEAK_PATTERNS = [
     (
         re.compile(r"(?<![0-9.])\d{1,3}(?:\.\d{1,3}){3}(?![0-9.])"),
@@ -893,14 +915,62 @@ SITE_LEAK_PATTERNS = [
         "private IPv6 address (section 13)",
         ipv6_is_private,
     ),
+    (
+        re.compile(
+            r"\b[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9-]+)*"
+            r"\.(?:internal|local|corp|lan|intranet|private|home\.arpa)\b",
+            re.IGNORECASE,
+        ),
+        "publish",
+        "internal hostname (section 13)",
+        internal_host_is_real,
+    ),
+    (
+        re.compile(r"\barn:aws(?:-[a-z-]+)?:[a-z0-9-]+:[a-z0-9-]*:(\d{12}):[^\s`)\]\"'<>]+"),
+        "publish",
+        "account identifier (section 13)",
+        arn_is_real,
+    ),
+    (
+        re.compile(r"\b([a-z0-9][a-z0-9-]*)@([a-z0-9][a-z0-9-]*)\.iam\.gserviceaccount\.com\b"),
+        "publish",
+        "account identifier (section 13)",
+        service_account_is_real,
+    ),
+    (
+        re.compile(
+            r"""(?i)\b(?:aws_?account_?id|account_?id|tenant_?id|subscription_?id)\b"""
+            r"""\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{12})["']?"""
+        ),
+        "publish",
+        "account identifier (section 13)",
+        account_field_is_real,
+    ),
 ]
 
 
+def _scan_leak_patterns(rel: str, text: str, patterns, ctx: FileContext, report: Report) -> None:
+    for pattern, category, label, predicate in patterns:
+        for match in pattern.finditer(text):
+            # A pattern without a predicate describes prose, and a fenced
+            # block is not prose. The style guide shows each of these
+            # shapes as an example of what to avoid.
+            if predicate is None and not ctx.prose[match.start():match.end()].strip():
+                continue
+            if predicate is not None and not predicate(text, match, ctx):
+                continue
+            report.add(category, f"{rel}: {label}: {match.group(0)[:40]}")
+
+
 def check_leaks(root: Path, report: Report) -> None:
+    site_path_patterns = [*LEAK_PATTERNS[:3], *SITE_LEAK_PATTERNS]
     for path in iter_files(root):
         rel = path.relative_to(root).as_posix()
         markdown = is_markdown(path)
         if rel.startswith("site/"):
+            site_rel_path = "/" + rel[len("site/"):]
+            path_ctx = FileContext(url_spans=[], prose=site_rel_path, masked=site_rel_path)
+            _scan_leak_patterns(rel, site_rel_path, site_path_patterns, path_ctx, report)
             status, site_text = read_deployed_site_asset(root, path)
             if status == "unscanned_binary":
                 report.add(
@@ -925,16 +995,7 @@ def check_leaks(root: Path, report: Report) -> None:
         patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:3])
         if rel.startswith("site/"):
             patterns.extend(SITE_LEAK_PATTERNS)
-        for pattern, category, label, predicate in patterns:
-            for match in pattern.finditer(text):
-                # A pattern without a predicate describes prose, and a fenced
-                # block is not prose. The style guide shows each of these
-                # shapes as an example of what to avoid.
-                if predicate is None and not ctx.prose[match.start():match.end()].strip():
-                    continue
-                if predicate is not None and not predicate(text, match, ctx):
-                    continue
-                report.add(category, f"{rel}: {label}: {match.group(0)[:40]}")
+        _scan_leak_patterns(rel, text, patterns, ctx, report)
 
 
 def matching_internal_note_pattern(rel: str) -> str | None:
