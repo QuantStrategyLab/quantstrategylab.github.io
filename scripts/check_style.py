@@ -1142,6 +1142,10 @@ DISALLOWED_SITE_HTML_RE = [
         ),
         "remote or inline-scheme stylesheet or script in site/",
     ),
+    (
+        re.compile(r"(?i)<\s*(?:details|dialog|select|option|textarea|input|canvas|audio|video|marquee|math)\b"),
+        "unmodeled interactive or collapsible element in site/",
+    ),
 ]
 
 
@@ -1253,10 +1257,42 @@ def count_grid_columns(val: str) -> int | None:
     return total if total >= 1 else -1
 
 
-def parse_style_decls(decl_text: str) -> tuple[dict[str, tuple[object, bool]], list[str]]:
+ALLOWED_SITE_CSS_PROPS = {
+    "-webkit-font-smoothing",
+    "align-items", "align-self", "animation",
+    "background", "background-color",
+    "border", "border-bottom", "border-color", "border-left", "border-radius", "border-right", "border-top",
+    "box-sizing", "clip", "color", "content", "counter-increment", "counter-reset", "cursor",
+    "display", "fill", "flex", "flex-direction", "flex-grow", "flex-shrink", "flex-wrap",
+    "font", "font-family", "font-size", "font-style", "font-weight",
+    "gap", "row-gap", "column-gap",
+    "grid-column", "grid-column-start", "grid-row", "grid-row-start", "grid-template-columns",
+    "height", "justify-content", "letter-spacing", "line-height", "list-style",
+    "margin", "margin-bottom", "margin-left", "margin-right", "margin-top",
+    "max-height", "max-width", "min-height", "min-width",
+    "opacity", "order", "outline", "outline-offset", "overflow",
+    "padding", "padding-bottom", "padding-left", "padding-right", "padding-top",
+    "position", "stroke", "stroke-linecap", "stroke-linejoin", "stroke-width",
+    "text-align", "text-decoration", "text-decoration-thickness", "text-rendering",
+    "text-transform", "text-underline-offset", "transition", "visibility", "white-space", "width",
+}
+TRANSPARENT_COLOR_RE = re.compile(
+    r"(?i)\btransparent\b|color-mix\("
+    r"|rgba?\([^)]*[,/]\s*0(?:\.0+)?%?\s*\)"
+    r"|hsla?\([^)]*[,/]\s*0(?:\.0+)?%?\s*\)"
+    r"|#(?:[0-9a-f]{3}0|[0-9a-f]{6}00)\b"
+)
+CSS_DYNAMIC_FUNC_RE = re.compile(r"(?i)\b(?:var|calc|min|max|clamp)\(")
+
+
+def parse_style_decls(
+    decl_text: str, allow_zero_scrollbar: bool = False
+) -> tuple[dict[str, tuple[object, bool]], list[str]]:
     """Parse CSS declarations relevant to visual layout, ordering, and visibility."""
     props: dict[str, tuple[object, bool]] = {}
     invalid: list[str] = []
+    raw_decls: dict[str, str] = {}
+    small_box_dims: list[str] = []
     clean = CSS_COMMENT_RE.sub("", unescape_css_literals(decl_text))
     for part in clean.split(";"):
         if ":" not in part:
@@ -1265,14 +1301,110 @@ def parse_style_decls(decl_text: str) -> tuple[dict[str, tuple[object, bool]], l
         k = k.strip().lower()
         imp = bool(re.search(r"(?i)!important\s*$", raw_v))
         v = re.sub(r"(?i)\s*!important\s*$", "", raw_v.strip()).strip()
+        vl = v.lower()
+        if not k.startswith("--") and k not in ALLOWED_SITE_CSS_PROPS:
+            invalid.append(f"unmodeled CSS property ({k})")
+            continue
+        if (k.startswith("--") or k in ("color", "fill")) and TRANSPARENT_COLOR_RE.search(v):
+            invalid.append(f"transparent color hiding ({k})")
+        raw_decls[k] = v
         if k == "display":
-            props["display"] = (v.lower(), imp)
+            if vl in {
+                "none", "contents", "block", "inline", "inline-block", "flex",
+                "inline-flex", "grid", "inline-grid", "list-item", "table", "table-row", "table-cell",
+            }:
+                props["display"] = (vl, imp)
+            else:
+                invalid.append(f"display:{v[:24]}")
         elif k == "visibility":
-            props["visibility"] = (v.lower(), imp)
+            if vl in {"visible", "hidden", "collapse"}:
+                props["visibility"] = (vl, imp)
+            else:
+                invalid.append(f"visibility:{v[:24]}")
         elif k == "opacity":
-            props["opacity"] = (v.lower(), imp)
+            if re.match(r"^(?:0(?:\.0+)?|\.0+|1(?:\.0+)?|0?\.[2-9]\d*)$", vl):
+                props["opacity"] = ("0" if float(vl) == 0.0 else vl, imp)
+            else:
+                invalid.append(f"opacity:{v[:24]}")
+        elif k == "position":
+            if vl in {"static", "relative", "absolute"}:
+                props["position"] = (vl, imp)
+            else:
+                invalid.append(f"position:{v[:24]}")
+        elif k == "clip":
+            if vl == "auto":
+                props["clip"] = ("auto", imp)
+            elif re.match(
+                r"^rect\(\s*0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?\s*\)$",
+                vl,
+            ):
+                props["clip"] = ("zero", imp)
+            else:
+                invalid.append(f"clip:{v[:24]}")
         elif k == "font-size":
-            props["font-size"] = (v.lower(), imp)
+            if CSS_DYNAMIC_FUNC_RE.search(vl):
+                invalid.append(f"font-size:{v[:24]}")
+            else:
+                m_fs = re.match(r"^([+-]?\d+(?:\.\d+)?)([a-z%]+)?$", vl)
+                if m_fs:
+                    fs_num = float(m_fs.group(1))
+                    fs_unit = m_fs.group(2) or "px"
+                    min_fs = 0.25 if fs_unit in ("em", "rem", "ch") else 4.0
+                    if fs_num == 0.0:
+                        props["font-size"] = ("0", imp)
+                    elif fs_num < 0.0 or fs_num < min_fs:
+                        invalid.append(f"font-size:{v[:24]}")
+                    else:
+                        props["font-size"] = (vl, imp)
+                else:
+                    props["font-size"] = (vl, imp)
+        elif k == "line-height":
+            if CSS_DYNAMIC_FUNC_RE.search(vl):
+                invalid.append(f"line-height:{v[:24]}")
+            else:
+                m_lh = re.match(r"^([+-]?\d+(?:\.\d+)?)$", vl)
+                if m_lh and float(m_lh.group(1)) < 0.5:
+                    invalid.append(f"line-height:{v[:24]}")
+        elif k == "font":
+            if vl != "inherit":
+                stripped_v = re.sub(r"\bvar\(--[a-zA-Z0-9_-]+\)", "", vl)
+                if CSS_DYNAMIC_FUNC_RE.search(stripped_v) or re.search(
+                    r"(?<![\d.])0(?:\.0+)?(?:px|em|rem|%|pt|ch|vw|vh)?(?:\s*/|\s|$)",
+                    stripped_v,
+                ):
+                    invalid.append(f"font:{v[:24]}")
+        elif k == "letter-spacing":
+            if CSS_DYNAMIC_FUNC_RE.search(vl):
+                invalid.append(f"letter-spacing:{v[:24]}")
+            elif "-" in vl:
+                m_ls = re.match(r"^-(\d*(?:\.\d+)?)([a-z%]+)?$", vl)
+                if not m_ls:
+                    invalid.append(f"letter-spacing:{v[:24]}")
+                else:
+                    ls_num = float(m_ls.group(1))
+                    ls_unit = m_ls.group(2) or "px"
+                    max_neg = 0.05 if ls_unit in ("em", "rem") else (1.0 if ls_unit == "px" else 0.0)
+                    if ls_num > max_neg:
+                        invalid.append(f"letter-spacing:{v[:24]}")
+        elif k in ("margin", "margin-top", "margin-right", "margin-bottom", "margin-left"):
+            if CSS_DYNAMIC_FUNC_RE.search(vl):
+                invalid.append(f"{k}:{v[:24]}")
+            else:
+                for m_neg in re.finditer(r"-(\d+(?:\.\d+)?)([a-z%]*)", vl):
+                    if m_neg.group(2) != "px" or float(m_neg.group(1)) > 32.0:
+                        invalid.append(f"{k}:{v[:24]}")
+                        break
+        elif k in ("width", "height", "max-width", "max-height"):
+            if CSS_DYNAMIC_FUNC_RE.search(vl):
+                invalid.append(f"{k}:{v[:24]}")
+            else:
+                m_dim = re.match(r"^([+-]?\d+(?:\.\d+)?)([a-z%]+)?$", vl)
+                if m_dim:
+                    dim_num = float(m_dim.group(1))
+                    dim_unit = m_dim.group(2) or "px"
+                    min_dim = 0.25 if dim_unit in ("em", "rem", "ch") else 2.0
+                    if dim_num < min_dim:
+                        small_box_dims.append(f"{k}:{v[:24]}")
         elif k == "order":
             m = re.match(r"^[+-]?\d+$", v)
             if m:
@@ -1281,7 +1413,7 @@ def parse_style_decls(decl_text: str) -> tuple[dict[str, tuple[object, bool]], l
                 invalid.append(f"order:{v[:24]}")
         elif k in ("grid-row", "grid-row-start", "grid-column", "grid-column-start"):
             prop_key = "grid-row" if k.startswith("grid-row") else "grid-column"
-            if v.lower() == "auto":
+            if vl == "auto":
                 props[prop_key] = (None, imp)
             else:
                 m = re.match(r"^(\d+)(?:\s*/\s*(\d+))?$", v)
@@ -1295,6 +1427,16 @@ def parse_style_decls(decl_text: str) -> tuple[dict[str, tuple[object, bool]], l
                 invalid.append(f"grid-template-columns:{v[:24]}")
             elif cols is not None:
                 props["grid-cols"] = (cols, imp)
+    has_zero_clip = props.get("clip", (None, False))[0] == "zero"
+    if props.get("position", (None, False))[0] == "absolute" and not has_zero_clip:
+        invalid.append("position:absolute without clip:rect(0,0,0,0)")
+    if small_box_dims and not (has_zero_clip or allow_zero_scrollbar):
+        invalid.append(f"sub-2px box dimension hiding ({small_box_dims[0]})")
+    if "color" in raw_decls:
+        c_val = raw_decls["color"].strip().lower()
+        bg_val = (raw_decls.get("background-color") or raw_decls.get("background") or "").strip().lower()
+        if (bg_val and c_val == bg_val) or (c_val == "var(--bg)" and not bg_val):
+            invalid.append("foreground color matching background hiding")
     return props, invalid
 
 
@@ -1411,7 +1553,10 @@ def parse_css_stylesheet(
     rules: list = []
     issues: list[str] = [] if in_at_rule else _check_css_safety(clean)
     idx = start_idx
-    layout_keys = {"display", "order", "grid-row", "grid-column", "grid-cols", "visibility", "opacity"}
+    layout_keys = {
+        "display", "order", "grid-row", "grid-column", "grid-cols",
+        "visibility", "opacity", "position", "clip",
+    }
     i, n = 0, len(clean)
     while i < n:
         brace = clean.find("{", i)
@@ -1455,7 +1600,10 @@ def parse_css_stylesheet(
                 rules.extend(sub_rules)
                 issues.extend(sub_issues)
             continue
-        props, bad_vals = parse_style_decls(body)
+        props, bad_vals = parse_style_decls(
+            body,
+            allow_zero_scrollbar=(prelude.strip().lower() == "::-webkit-scrollbar"),
+        )
         issues.extend(f"non-literal CSS visual-order value ({bv})" for bv in bad_vals)
         fs_val = props.get("font-size", ("", False))[0]
         has_zero_font = isinstance(fs_val, str) and bool(re.match(r"^0(?:\.0+)?(?:[a-z%]+)?$", fs_val))
@@ -1551,9 +1699,14 @@ def compute_node_style(
 
 
 def _is_hidden_node(node: _DOMNode, st: dict[str, object]) -> bool:
-    if node.tag in ("template", "script", "style", "noscript") or "hidden" in node.attrs:
+    if (
+        node.tag in ("template", "script", "style", "noscript", "svg", "defs", "symbol", "desc", "metadata")
+        or "hidden" in node.attrs
+    ):
         return True
     if st.get("display") == "none" or st.get("visibility") in ("hidden", "collapse"):
+        return True
+    if st.get("clip") == "zero" or st.get("position") == "absolute":
         return True
     if st.get("opacity") in ("0", "0.0", ".0"):
         return True
@@ -1937,29 +2090,30 @@ def normalize_html_text(
     seen_rendered: set[str] = {vis_dom_f, vis_dom_c}
     has_i18n = "data-i18n" in text and bool(i18n_maps)
     for vw in active_viewports:
-        vf, vc = serialize_visual_tree(
-            parser.dom_root, all_rules, viewport_w=vw, respect_order=True, skip_hidden=True
-        )
-        for v in (vf, vc):
-            if v not in seen_rendered:
-                seen_rendered.add(v)
-                rendered_views.append(v)
-        if has_i18n:
-            for imap in i18n_maps:
-                if not imap:
-                    continue
-                ivf, ivc = serialize_visual_tree(
-                    parser.dom_root,
-                    all_rules,
-                    viewport_w=vw,
-                    respect_order=True,
-                    skip_hidden=True,
-                    i18n_map=imap,
-                )
-                for v in (ivf, ivc):
-                    if v not in seen_rendered:
-                        seen_rendered.add(v)
-                        rendered_views.append(v)
+        for skip_hidden in (True, False):
+            vf, vc = serialize_visual_tree(
+                parser.dom_root, all_rules, viewport_w=vw, respect_order=True, skip_hidden=skip_hidden
+            )
+            for v in (vf, vc):
+                if v not in seen_rendered:
+                    seen_rendered.add(v)
+                    rendered_views.append(v)
+            if has_i18n:
+                for imap in i18n_maps:
+                    if not imap:
+                        continue
+                    ivf, ivc = serialize_visual_tree(
+                        parser.dom_root,
+                        all_rules,
+                        viewport_w=vw,
+                        respect_order=True,
+                        skip_hidden=skip_hidden,
+                        i18n_map=imap,
+                    )
+                    for v in (ivf, ivc):
+                        if v not in seen_rendered:
+                            seen_rendered.add(v)
+                            rendered_views.append(v)
 
     combined = "\n".join([
         "".join(parser.inline_parts),
@@ -2101,7 +2255,7 @@ def always_report(text: str, match: re.Match, ctx: FileContext) -> bool:
     return True
 
 
-SITE_LEAK_PATTERNS = [
+IDENTIFIER_LEAK_PATTERNS = [
     (
         re.compile(r"(?<![0-9.])\d{1,3}(?:\.\d{1,3}){3}(?![0-9.])"),
         "publish",
@@ -2149,6 +2303,9 @@ SITE_LEAK_PATTERNS = [
         "account identifier (section 13)",
         account_field_is_real,
     ),
+]
+SITE_LEAK_PATTERNS = [
+    *IDENTIFIER_LEAK_PATTERNS,
     (
         re.compile(
             r"(?i)\bdata:(?:image|application|audio|video|font|model|multipart|text)/"
@@ -2257,14 +2414,21 @@ def check_leaks(root: Path, report: Report) -> None:
             text = path.read_text(encoding="utf-8", errors="ignore")
         else:
             continue
-        prose = blank_fenced_blocks(text)
-        masked = blank_code_spans(prose)
-        ctx = FileContext(
-            url_spans=[(m.start(), m.end()) for m in URL_TOKEN.finditer(text)],
-            prose=prose,
-            masked=masked,
-        )
-        _scan_leak_patterns(rel, text, list(LEAK_PATTERNS), ctx, report)
+        md_patterns = [*LEAK_PATTERNS, *IDENTIFIER_LEAK_PATTERNS]
+        seen_md: set[tuple[str, str]] = set()
+        md_views = [text]
+        unescaped_md = html.unescape(text)
+        if unescaped_md != text:
+            md_views.append(unescaped_md)
+        for md_view in md_views:
+            prose = blank_fenced_blocks(md_view)
+            masked = blank_code_spans(prose)
+            ctx = FileContext(
+                url_spans=[(m.start(), m.end()) for m in URL_TOKEN.finditer(md_view)],
+                prose=prose,
+                masked=masked,
+            )
+            _scan_leak_patterns(rel, md_view, md_patterns, ctx, report, seen_md)
 
 
 def matching_internal_note_pattern(rel: str) -> str | None:

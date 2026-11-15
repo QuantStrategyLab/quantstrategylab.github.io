@@ -427,6 +427,17 @@ class LeakTest(CheckerTestCase):
         )
         self.write("site/nonpixel-media.css", "@media (prefers-color-scheme: dark) { .hid { display: none; } }\n")
         self.write("site/bad-handler.html", '<img src="landing-light-192.png" onclick="evil()"><a href="javascript:evil()">x</a>\n')
+        self.write(
+            "site/sr-only-sentinel.html",
+            "<style>.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}</style>\n"
+            '<p>actual-private-app.work<span class="sr-only">SAFE</span>ers.dev</p>\n',
+        )
+        self.write(
+            "site/clip-path-hide.html",
+            "<style>.hidden{position:absolute;clip-path:inset(100%)}</style>\n"
+            '<p>actual-private-app.work<span class="hidden">SAFE</span>ers.dev</p>\n',
+        )
+        self.write("site/zero-width-hide.html", "<style>.z{width:0;overflow:hidden}</style>\n<p>x</p>\n")
 
         extra_report = self.report()
         check_style.check_leaks(self.root, extra_report)
@@ -442,6 +453,30 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/nonpixel-media.css" in m and "non-pixel conditional layout rule" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/bad-handler.html" in m and "inline event handler attribute" in m for m in extra_msgs), extra_msgs)
         self.assertTrue(any("site/bad-handler.html" in m and "javascript: or vbscript: URI" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/sr-only-sentinel.html" in m and "personal subdomain" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/clip-path-hide.html" in m and "unmodeled CSS property (clip-path)" in m for m in extra_msgs), extra_msgs)
+        self.assertTrue(any("site/zero-width-hide.html" in m and "sub-2px box dimension hiding" in m for m in extra_msgs), extra_msgs)
+
+    def test_public_markdown_scans_account_and_internal_host_identifiers(self):
+        self.write(
+            "README.md",
+            '```json\n{"account_id": "000000000000", "host": "your-host.internal", '
+            '"arn": "arn:aws:iam::000000000000:role/example", "sa": "your-sa@example.iam.gserviceaccount.com"}\n```\n',
+        )
+        clean = self.report()
+        check_style.check_leaks(self.root, clean)
+        self.assertEqual(clean.findings, [])
+
+        self.write(
+            "README.md",
+            '```json\n{"account_id": "123456789012", "host": "db-primary.ops.internal", "ip": "10.23.45.67"}\n```\n',
+        )
+        dirty = self.report()
+        check_style.check_leaks(self.root, dirty)
+        msgs = self.messages(dirty, "publish")
+        self.assertTrue(any("account identifier" in m for m in msgs), msgs)
+        self.assertTrue(any("internal hostname" in m for m in msgs), msgs)
+        self.assertTrue(any("private IPv4 address" in m for m in msgs), msgs)
 
     def test_sha_in_url_is_not_reported(self):
         text = (
