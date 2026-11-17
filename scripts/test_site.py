@@ -369,6 +369,15 @@ class LeakTest(CheckerTestCase):
             + _png_chunk(b"IDAT", zlib.compress(b"\x09\xff\x00\x00"))
             + _png_chunk(b"IEND", b"")
         )
+        (self.root / "site/valid-ancillary.png").write_bytes(
+            _make_png(
+                _png_chunk(b"sRGB", b"\x00"),
+                _png_chunk(b"pHYs", struct.pack(">IIB", 2835, 2835, 1)),
+            )
+        )
+        (self.root / "site/smuggled-phys.png").write_bytes(
+            _make_png(_png_chunk(b"pHYs", b"/home/operator/prod/config"))
+        )
 
         report = self.report()
         check_site.check_leaks(self.root, report)
@@ -379,6 +388,8 @@ class LeakTest(CheckerTestCase):
         self.assertFalse(any("site/interlaced-valid.png" in m for m in msgs), msgs)
         self.assertTrue(any("site/interlaced-smuggled.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/interlaced-bad-filter.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertFalse(any("site/valid-ancillary.png" in m for m in msgs), msgs)
+        self.assertTrue(any("site/smuggled-phys.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "private IPv4 address" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "personal subdomain" in m for m in msgs))
@@ -425,9 +436,20 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/bad name.txt" in m and "space" in m for m in naming), naming)
 
     def test_inline_style_urls_and_empty_fragments(self):
+        self.write("site/product-details.html", '<h1 id="产品">Details</h1>\n')
+        self.write(
+            "site/nested/guide.html",
+            '<a href="?lang=en">English</a><a href="../product%2Ddetails.html#%E4%BA%A7%E5%93%81">Details</a>\n',
+        )
         self.write(
             "site/index.html",
-            '<div style="border-bottom:0"><a href="#">Back to top</a><a href="/#">Home</a></div>\n',
+            '<div id="产品" style="border-bottom:0">'
+            '<a href="#">Back to top</a>'
+            '<a href="/#">Home</a>'
+            '<a href="?lang=en">English</a>'
+            '<a href="#%E4%BA%A7%E5%93%81">产品</a>'
+            '<a href="product%2Ddetails.html">Product</a>'
+            "</div>\n",
         )
         clean = self.report()
         check_site.check_leaks(self.root, clean)
@@ -436,7 +458,8 @@ class LeakTest(CheckerTestCase):
         self.write(
             "site/inline-style-leak.html",
             '<div style="background-image:url(https://db-primary&#92;2e ops&#92;2e internal/x.png)">x</div>\n'
-            '<a href="#missing-id">jump</a>\n',
+            '<a href="#missing-id">jump</a>\n'
+            '<a href="?lang=en#missing-id">query-missing</a>\n',
         )
         dirty = self.report()
         check_site.check_leaks(self.root, dirty)
@@ -445,6 +468,7 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("remote or inline-scheme CSS url() resource" in m for m in publish), publish)
         self.assertTrue(any("internal hostname" in m for m in publish), publish)
         self.assertTrue(any("broken fragment link -> #missing-id" in m for m in links), links)
+        self.assertTrue(any("broken fragment link -> ?lang=en#missing-id" in m for m in links), links)
 
     def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
         self.write(

@@ -333,6 +333,9 @@ def resolve_site_asset_href(page_rel: str, href: str) -> str | None:
     clean = raw.split("#", 1)[0].split("?", 1)[0].strip()
     if not clean or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", clean):
         return None
+    clean = urllib.parse.unquote(clean)
+    if not clean or "\\" in clean or "\x00" in clean or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", clean):
+        return None
     sub_page = page_rel[len("site/"):] if page_rel.startswith("site/") else page_rel
     if clean.startswith("/"):
         rel_in_site = posixpath.normpath(clean.lstrip("/"))
@@ -413,6 +416,39 @@ def _valid_png_scanlines(
     return offset == len(decomp)
 
 
+def _valid_ancillary_png_chunk(
+    ctype: bytes, cdata: bytes, bit_depth: int, color_type: int, plte_entries: int
+) -> bool:
+    """Validate structure and spec-mandated byte sizes of allowed ancillary PNG chunks."""
+    if ctype == b"sRGB":
+        return len(cdata) == 1 and cdata[0] <= 3
+    if ctype == b"gAMA":
+        return len(cdata) == 4 and struct.unpack(">I", cdata)[0] > 0
+    if ctype == b"cHRM":
+        return len(cdata) == 32
+    if ctype == b"pHYs":
+        return len(cdata) == 9 and cdata[8] in (0, 1)
+    if ctype == b"sBIT":
+        expected = 3 if color_type == 3 else PNG_CHANNELS[color_type]
+        max_bits = 8 if color_type == 3 else bit_depth
+        return len(cdata) == expected and all(1 <= b <= max_bits for b in cdata)
+    if ctype == b"bKGD":
+        if color_type == 3:
+            return plte_entries > 0 and len(cdata) == 1 and cdata[0] < plte_entries
+        return len(cdata) == (2 if color_type in (0, 4) else 6)
+    if ctype == b"tRNS":
+        if color_type == 0:
+            return len(cdata) == 2
+        if color_type == 2:
+            return len(cdata) == 6
+        if color_type == 3:
+            return plte_entries > 0 and 1 <= len(cdata) <= plte_entries
+        return False
+    if ctype == b"hIST":
+        return plte_entries > 0 and len(cdata) == 2 * plte_entries
+    return False
+
+
 def inspect_png_asset(raw: bytes) -> tuple[str, bool] | None:
     """Validate PNG magic, chunk CRCs, IHDR, IDAT zlib stream, IEND, and ancillary text chunks.
 
@@ -424,6 +460,8 @@ def inspect_png_asset(raw: bytes) -> tuple[str, bool] | None:
     ihdr: tuple[int, int, int, int, int] | None = None
     seen_iend = False
     has_text_meta = False
+    seen_ancillary: set[bytes] = set()
+    plte_entries = 0
     idat_parts: list[bytes] = []
     parts: list[str] = []
     while pos + 8 <= len(raw):
@@ -464,7 +502,24 @@ def inspect_png_asset(raw: bytes) -> tuple[str, bool] | None:
         if ctype == b"IDAT":
             idat_parts.append(cdata)
             continue
+        if ctype == b"PLTE":
+            if (
+                ihdr[3] != 3
+                or idat_parts
+                or ctype in seen_ancillary
+                or not (3 <= len(cdata) <= 3 * (1 << ihdr[2]))
+                or len(cdata) % 3 != 0
+            ):
+                return None
+            seen_ancillary.add(ctype)
+            plte_entries = len(cdata) // 3
+            continue
         if ctype in PNG_ALLOWED_ANCILLARY_CHUNKS:
+            if idat_parts or ctype in seen_ancillary:
+                return None
+            if not _valid_ancillary_png_chunk(ctype, cdata, ihdr[2], ihdr[3], plte_entries):
+                return None
+            seen_ancillary.add(ctype)
             continue
         if ctype in PNG_TEXT_CHUNKS:
             has_text_meta = True
@@ -475,6 +530,8 @@ def inspect_png_asset(raw: bytes) -> tuple[str, bool] | None:
             continue
         return None
     if ihdr is None or not seen_iend or pos != len(raw) or not idat_parts:
+        return None
+    if ihdr[3] == 3 and plte_entries == 0:
         return None
     decomp = _zlib_decompress_exact(b"".join(idat_parts))
     if decomp is None:
@@ -948,18 +1005,30 @@ def check_site_links_and_safety(
                 _emit("links", f"broken local {kind} link -> {target}")
         elif kind == "anchor":
             raw = target.strip()
+            if not raw:
+                continue
+            unq_raw = urllib.parse.unquote(raw)
+            if re.match(r"^(?:https?:|mailto:|tel:|javascript:|vbscript:|data:|//)", raw, re.IGNORECASE) or re.match(
+                r"^(?:https?:|mailto:|tel:|javascript:|vbscript:|data:|//)", unq_raw, re.IGNORECASE
+            ):
+                continue
             if raw.startswith("#"):
-                frag = raw[1:]
+                frag = urllib.parse.unquote(raw[1:])
                 if frag and frag not in parser.element_ids:
                     _emit("links", f"broken fragment link -> {target}")
+            elif raw.startswith("?"):
+                if "#" in raw:
+                    frag = urllib.parse.unquote(raw.split("#", 1)[1])
+                    if frag and frag not in parser.element_ids:
+                        _emit("links", f"broken fragment link -> {target}")
             elif raw == "/" or raw.startswith(("/#", "/?")):
                 if not (root / "site/index.html").is_file():
                     _emit("links", f"broken relative link -> {target}")
-                elif rel == "site/index.html" and raw.startswith("/#"):
-                    frag = raw[2:]
+                elif rel == "site/index.html" and "#" in raw:
+                    frag = urllib.parse.unquote(raw.split("#", 1)[1])
                     if frag and frag not in parser.element_ids:
                         _emit("links", f"broken fragment link -> {target}")
-            elif raw and not re.match(r"^(?:https?:|mailto:|tel:|javascript:|vbscript:|data:|//)", raw, re.IGNORECASE):
+            else:
                 resolved = resolve_site_asset_href(rel, raw)
                 if resolved is None:
                     _emit("links", f"broken relative link -> {target}")
