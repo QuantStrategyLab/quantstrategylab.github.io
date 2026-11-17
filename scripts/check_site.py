@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check QuantStrategyLab website assets, DOM/CSS integrity, and identifier leaks.
+"""Check QuantStrategyLab website assets, links, and identifier leaks.
 
 Usage:
     python scripts/check_site.py [--root PATH] [--phase {1,2}] [--advisory] [--visibility {public,private}]
@@ -10,15 +10,14 @@ from __future__ import annotations
 import argparse
 import base64
 import fnmatch
-import hashlib
 import html
 import ipaddress
+import json
 import posixpath
 import re
 import struct
 import subprocess
 import sys
-import unicodedata
 import urllib.parse
 import zlib
 from html.parser import HTMLParser
@@ -31,22 +30,15 @@ SKIP_DIRS = {
     ".idea", ".vscode",
 }
 
-# Section 13 says "non-placeholder buckets" and section 7 line 104 says the
-# placeholder form is `<bucket>`, `<project-id>`, `$PROJECTS_ROOT`. So a
-# `gs://` URI whose bucket segment is a placeholder is the correct form, not a
-# finding. `synthetic-` is on the list because the organisation's fixtures are
-# named that way; without it every fixture a doc quotes becomes a finding the
-# day the doc is written.
+# Section 13 says "non-placeholder buckets" and section 7 says the placeholder
+# form is `<bucket>`, `<project-id>`, `$PROJECTS_ROOT`. A `gs://` URI whose
+# bucket segment is a placeholder is the correct form, not a finding.
 PLACEHOLDER_BUCKET = re.compile(
     r"^[<{$]|[<>{}]|\.\.\."
     r"|^(?:your|my|example|sample|placeholder|shared|synthetic)[-_]"
     r"|^bucket(?:-|$)"
 )
 
-# Section 13 asks for a placeholder wherever a deployed subdomain would appear,
-# so `YOUR_SUBDOMAIN.workers.dev` is the correct form, not a finding. Matching
-# the domain shape alone reports the guide's own advice as a leak, which is how
-# a check earns the reputation that lets the real leak through.
 PLACEHOLDER_SUBDOMAIN = re.compile(
     r"^[<{$]|[<>{}]"
     r"|^(?:your|my|example|sample|placeholder)[-_]"
@@ -62,36 +54,25 @@ class FileContext(NamedTuple):
     """Per-file material the leak predicates need to judge a match."""
 
     url_spans: list[tuple[int, int]]
-    prose: str  # the text with fenced blocks blanked out, offsets preserved
+    prose: str  # text with fenced blocks blanked out, offsets preserved
     masked: str  # `prose` with inline code blanked out too
 
 
 def phrase_is_prose(text: str, match: re.Match, ctx: FileContext) -> bool:
-    """A rule about phrasing describes prose; backticks name the phrase.
-
-    The style guide writes `this round` when it means the words, and a value
-    rule such as `gs://` is the opposite case: a bucket inside backticks is
-    still a bucket. That is why this is a per-rule predicate and not a blanket
-    skip on code spans.
-    """
+    """Return True when a prose-only rule matched outside code spans and fences."""
     return bool(ctx.masked[match.start():match.end()].strip())
 
 
 def bucket_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
+    """Return True when a `gs://` URI names a non-placeholder bucket."""
     bucket = match.group(0)[len("gs://"):].split("/", 1)[0].lower()
-    # A sentence-final period is punctuation, not part of the name. An ellipsis
-    # is the placeholder, so it must survive this.
     if bucket.endswith(".") and not bucket.endswith("..."):
         bucket = bucket[:-1]
     return bool(bucket) and not PLACEHOLDER_BUCKET.search(bucket)
 
 
 def subdomain_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
-    """A placeholder subdomain is the form section 13 asks for, not a leak.
-
-    What survives this predicate is a subdomain that was actually deployed,
-    including inside fenced command or config examples.
-    """
+    """Return True when a `*.workers.dev` host is not a documented placeholder."""
     subdomain = match.group(0)[: -len(".workers.dev")]
     return not PLACEHOLDER_SUBDOMAIN.search(subdomain.lower())
 
@@ -108,7 +89,7 @@ PLACEHOLDER_PATH_SEG = re.compile(
 
 
 def home_path_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
-    """Reject workstation home paths in prose and fenced examples while allowing placeholders."""
+    """Reject workstation home paths while allowing placeholders and URL `/home/` segments."""
     if any(start <= match.start() < end for start, end in ctx.url_spans):
         return False
     return not PLACEHOLDER_HOME_USER.search(match.group(0))
@@ -136,44 +117,23 @@ def windows_path_is_real(text: str, match: re.Match, ctx: FileContext) -> bool:
 
 
 def hex_is_prose(text: str, match: re.Match, ctx: FileContext) -> bool:
-    """Section 5 forbids 40-character hex *in prose* — CI head SHAs pasted in.
-
-    A revision reference is a different thing and the guide asks for it: line
-    377 writes `<40-char sha>` and the cross-repo links pin `blob/<sha>/`. So
-    the three forms that carry a revision are exempt, and what is left is the
-    case the rule was written for.
-    """
+    """Reject bare 40-char hex SHAs in prose while exempting links, code, and placeholders."""
     if ctx.prose[match.start()] == " ":
-        return False  # inside a fenced block: a contract example, not prose
+        return False
     for start, end in ctx.url_spans:
         if start <= match.start() < end:
-            return False  # a link target
+            return False
     line_start = text.rfind("\n", 0, match.start()) + 1
     line_end = text.find("\n", match.end())
     line = text[line_start: line_end if line_end != -1 else len(text)]
     column = match.start() - line_start
     if line[:column].count("`") % 2 == 1:
-        return False  # a quoted identifier
+        return False
     if text[match.end(): match.end() + 2] == "](":
-        return False  # the label of a link whose target carries the same sha
-    return len(set(match.group(0))) != 1  # 000...0 and friends, a placeholder
+        return False
+    return len(set(match.group(0))) != 1
 
 
-# Section 13 grep list plus section 5 categories that are recognisable.
-# The lookbehind keeps URL paths such as https://example.com/home/legal/ out of
-# the results; "/home/" inside a URL is not a local path.
-#
-# Two categories, because they carry different weight. A real home path is
-# evidence that something leaked from a workstation. The rest are the guide's
-# own "prompt to check, not a certain failure" greps.
-#
-# The last column is a predicate deciding whether a match is a finding at all.
-# Both heuristics in this list match far more than they mean: `gs://` matches
-# `gs://<bucket>/...`, which is the form section 13 asks for, and a 40-character
-# hex string matches every commit SHA, which is how a cross-repository reference
-# is supposed to be pinned. Without the predicates the two rules reported 522
-# findings across the organisation and not one of them was a defect, which is
-# the same as having no rule: the report gets scrolled past.
 LEAK_PATTERNS = [
     (re.compile(r"(?<![\w.])/(?i:users|home)/[^\s`)\]\"'<>|]{2,}"),
      "paths", "absolute home path (section 13)", home_path_is_real),
@@ -189,9 +149,6 @@ LEAK_PATTERNS = [
      "publish", "personal subdomain (section 13)", subdomain_is_real),
     (re.compile(r"\b[0-9a-f]{40}\b"),
      "content", "40-character hex string in prose (section 5)", hex_is_prose),
-    # `| PR |` is a table header; `| PR #12 |` and `| #12 |` are the rows this
-    # rule is about. Matching the header too reported the guide's own row
-    # describing the rule.
     (re.compile(r"\|\s*(?:PR\s*#?\d+|#\d+)"),
      "content", "PR-number status table (section 5)", None),
     (re.compile(r"\b(this round|this task|in this task)\b", re.IGNORECASE),
@@ -201,9 +158,6 @@ LEAK_PATTERNS = [
 ]
 
 
-# Section 6: paths for notes that must never be committed. The four wildcard
-# entries are spelled with [Aa] character classes because .gitignore is
-# case-sensitive on some platforms and `*audit*.md` alone lets `Audit.md` past.
 INTERNAL_NOTE_GITIGNORE = [
     "*[Aa][Uu][Dd][Ii][Tt]*.md",
     "*[Hh][Aa][Nn][Dd][Oo][Ff][Ff]*.md",
@@ -223,37 +177,21 @@ INTERNAL_NOTE_GITIGNORE = [
     "*.internal.md",
 ]
 
-# Directories whose contents are working material, never reader-facing docs.
 INTERNAL_NOTE_DIRS = re.compile(
     r"(^|/)(docs/plans|docs/handoffs|docs/superpowers|docs/audits|docs/changes)/"
 )
 
-DATED_TITLE = re.compile(r"(audit|acceptance).*20\d{2}-\d{2}-\d{2}", re.IGNORECASE)
-
-# Blocking categories per phase.
-#
-# Phase 1 blocks only what is unambiguous: a leaked local path, a link a reader
-# cannot follow, a missing rules file, a .gitignore that has stopped keeping
-# working notes out. Everything else is reported as NOTE. Phase 2 blocks the
-# rest once the naming cleanup is done. README structure never blocks, because
-# section 3 is a default and section 4 says so.
 PHASE_BLOCKING = {
     1: {"paths", "links", "agents", "hygiene", "publish"},
     2: {"paths", "links", "agents", "hygiene", "publish", "content", "naming", "language", "docs"},
 }
 
-# Rules whose purpose is to stop an identifier being published.
-#
-# The style guide governs published documentation. In a private repository
-# nothing is published, and a deployment document may need the real host name to
-# be usable at all — an OAuth callback URL with a placeholder in it cannot be
-# configured. So these report as notes there and block in public repositories,
-# which is the case the rule was written for. The default stays "public", so
-# forgetting the flag cannot switch a leak rule off by accident.
 PUBLICATION_CATEGORIES = {"paths", "publish"}
 
 
 class Report:
+    """Collect categorized findings and separate blocking vs advisory items."""
+
     def __init__(self, blocking: set[str]) -> None:
         self.blocking = blocking
         self.findings: list[tuple[str, str]] = []
@@ -312,16 +250,17 @@ def is_untracked_gitignored(root: Path, rel_path: str) -> bool:
 
 
 def should_skip_path(root: Path, path: Path) -> bool:
+    """Skip tooling directories outside site/; Pages publishes the entire site/ tree."""
     rel_parts = path.relative_to(root).parts
     if ".git" in rel_parts:
         return True
-    # Pages publishes the entire site/ directory, including site/dist or site/build.
     if rel_parts and rel_parts[0] == "site":
         return False
     return any(part in SKIP_DIRS for part in rel_parts)
 
 
 def iter_files(root: Path):
+    """Yield repository files subject to scanning."""
     visible = git_visible_files(root)
     if visible is not None:
         for path in sorted(visible):
@@ -340,28 +279,16 @@ def is_markdown(path: Path) -> bool:
     return path.suffix.lower() in {".md", ".markdown"}
 
 
-
-
 CODE_SPAN = re.compile(r"`[^`\n]+`")
 
 
 def blank_code_spans(text: str) -> str:
-    """Replace inline code with spaces, keeping offsets.
-
-    A word in backticks is a mention: the style guide writes `robust` when it
-    means the word, and a research note writes a commit id as a value. Neither
-    is prose, and both were reported as prose.
-    """
+    """Replace inline code with spaces while preserving character offsets."""
     return CODE_SPAN.sub(lambda m: " " * len(m.group(0)), text)
 
 
 def blank_fenced_blocks(text: str) -> str:
-    """Replace fenced blocks with spaces, keeping every offset in place.
-
-    `hex_is_prose` needs to know whether a match sits in a contract example or
-    in running text, and it needs the character offsets to stay usable for the
-    line and backtick lookups that follow.
-    """
+    """Replace fenced code blocks with spaces while preserving character offsets."""
     def blank(match: re.Match) -> str:
         return re.sub(r"[^\n]", " ", match.group(0))
 
@@ -369,56 +296,28 @@ def blank_fenced_blocks(text: str) -> str:
 
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-PNG_EXTRA_IMAGE_CHUNKS = {
+PNG_ALLOWED_ANCILLARY_CHUNKS = {
     b"PLTE", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
-    b"sBIT", b"bKGD", b"hIST", b"pHYs", b"tIME",
+    b"sBIT", b"bKGD", b"hIST", b"pHYs",
 }
-PNG_CHANNELS = {0: 1, 2: 3, 4: 2, 6: 4}
-
-APPROVED_SITE_RASTERS: dict[str, list[tuple[int, int, int, int, int, str]]] = {
-    "site/favicon.ico": [
-        (16, 16, 8, 6, 0, "fba8bde649a5423b2934c86a8705d476694fb712fb8da98a80496ccb715889a7"),
-        (32, 32, 8, 6, 0, "9e27f396de07f6e3052d6a197ae10408596f79dba02a70e67c929e080e8df292"),
-        (48, 48, 8, 6, 0, "1786525e5efbafbd75de650f5a2a53cfdc3fe39ff2d388eba49f87cb892908c2"),
-    ],
-    "site/landing-light-192.png": [
-        (192, 192, 8, 6, 0, "26aa89b6369a45ace2c47db94d2eee28ed812caa92bc591fd59782e1aedf6124"),
-    ],
-    "site/landing-light-512.png": [
-        (512, 512, 8, 6, 0, "bdaabe227116fc88c75bde2110a00e1e6a64448a853137cdc512c4d2ebc1251a"),
-    ],
-    "site/landing-light-apple-touch-180.png": [
-        (180, 180, 8, 6, 0, "2db31b1e3ce7507ed4e9323d948d2bbc714d4033c6fd40c8cefbf995a6f053d5"),
-    ],
-    "site/landing-light-maskable-512.png": [
-        (512, 512, 8, 6, 0, "61aa86a2070e1187bd23e501a7df0fb8152dbba1024e36db63d4f50806cde018"),
-    ],
+PNG_TEXT_CHUNKS = {b"tEXt", b"zTXt", b"iTXt"}
+PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+PNG_VALID_BIT_DEPTHS = {
+    0: {1, 2, 4, 8, 16},
+    2: {8, 16},
+    3: {1, 2, 4, 8},
+    4: {8, 16},
+    6: {8, 16},
 }
 
-SITE_SCRIPT_SUFFIXES = {".js", ".mjs", ".cjs"}
-APPROVED_SITE_SCRIPT_FILES: dict[str, str] = {
-    "site/assets/app.js": "a38c89a342115396fc79960771a77eb63e314dc6874fdcad46529dead36a6408",
-    "site/assets/i18n.js": "4fdd39f086eed30377f5e2ff0c620a78d6f09d5bb63f785121db06c5685ebd9d",
-}
-APPROVED_SITE_INLINE_SCRIPTS: set[str] = {
-    "df216a14d05020b1d67c017b9252c0390dcfd70f727e188f42d8b92ac557637f",
-}
-APPROVED_SITE_VECTOR_FILES: dict[str, str] = {
-    "site/landing-light.svg": "82688b5a7a13ae562efffc5b3cebf9060ddf8d8c95a593441ada3cd5e3a92c85",
-}
-APPROVED_SITE_INLINE_SVGS: set[str] = {
-    "d2148efc230494e3ed92cfc84f356d3cbe3a2436e60a125640e981106d518c07",
-    "63ceec9a23ee08da79fcc3022b56d4908a34d0268982d1d5596892d09af3bb47",
-    "e89ab06f8dca3c8bfb330fa5f17eb3ce8f6c1efc0940b79ee691e66948c3aa70",
-}
 ALLOWED_SITE_TEXT_SUFFIXES: set[str] = {
-    ".html", ".htm", ".css", ".json", ".webmanifest",
-    ".yaml", ".yml", ".toml", ".txt", ".md", ".map",
+    ".html", ".htm", ".xhtml", ".css", ".js", ".mjs", ".cjs", ".svg", ".xml",
+    ".json", ".webmanifest", ".yaml", ".yml", ".toml", ".txt", ".md", ".map",
 }
 
 
 def resolve_site_asset_href(page_rel: str, href: str) -> str | None:
-    """Resolve a site/-local HTML href against page_rel; return None for external or escaping targets."""
+    """Resolve a site/-local HTML/CSS href against page_rel; return None for external or escaping targets."""
     raw = href.strip()
     if not raw or raw.startswith("//") or "\\" in raw:
         return None
@@ -437,55 +336,6 @@ def resolve_site_asset_href(page_rel: str, href: str) -> str | None:
     return "site/" + rel_in_site
 
 
-def unfilter_png_scanlines(
-    decomp: bytes, width: int, height: int, bit_depth: int, color_type: int
-) -> bytes | None:
-    """Reconstruct unfiltered raw pixel bytes for non-interlaced 8/16-bit PNGs."""
-    channels = PNG_CHANNELS.get(color_type)
-    if channels is None or bit_depth not in (8, 16) or width < 1 or height < 1:
-        return None
-    bpp = channels * (bit_depth // 8)
-    stride = width * bpp
-    if len(decomp) != (stride + 1) * height:
-        return None
-    out = bytearray(stride * height)
-    for y in range(height):
-        row_start = y * (stride + 1)
-        ftype = decomp[row_start]
-        row = decomp[row_start + 1:row_start + 1 + stride]
-        base = y * stride
-        if ftype == 0:
-            out[base:base + stride] = row
-        elif ftype == 1:
-            for i in range(stride):
-                a = out[base + i - bpp] if i >= bpp else 0
-                out[base + i] = (row[i] + a) & 0xFF
-        elif ftype == 2:
-            prev = base - stride
-            for i in range(stride):
-                b = out[prev + i] if y > 0 else 0
-                out[base + i] = (row[i] + b) & 0xFF
-        elif ftype == 3:
-            prev = base - stride
-            for i in range(stride):
-                a = out[base + i - bpp] if i >= bpp else 0
-                b = out[prev + i] if y > 0 else 0
-                out[base + i] = (row[i] + ((a + b) >> 1)) & 0xFF
-        elif ftype == 4:
-            prev = base - stride
-            for i in range(stride):
-                a = out[base + i - bpp] if i >= bpp else 0
-                b = out[prev + i] if y > 0 else 0
-                c = out[prev + i - bpp] if (y > 0 and i >= bpp) else 0
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-                out[base + i] = (row[i] + pr) & 0xFF
-        else:
-            return None
-    return bytes(out)
-
-
 def _zlib_decompress_exact(data: bytes) -> bytes | None:
     """Decompress a zlib stream and fail closed on truncation or trailing bytes."""
     zobj = zlib.decompressobj()
@@ -498,16 +348,53 @@ def _zlib_decompress_exact(data: bytes) -> bytes | None:
     return out
 
 
-def inspect_png_asset(
-    raw: bytes,
-) -> tuple[str, tuple[int, int, int, int, int, str], bool] | None:
-    """Validate PNG structure/CRCs/scanlines and return (metadata_text, sig, clean_chunks)."""
+def _decode_png_text_chunk(ctype: bytes, cdata: bytes) -> list[str] | None:
+    """Decode a PNG tEXt/zTXt/iTXt chunk into text parts, or None if malformed."""
+    if ctype == b"tEXt":
+        if b"\x00" not in cdata:
+            return None
+        return [cdata.replace(b"\x00", b"\n").decode("latin-1")]
+    if ctype == b"zTXt":
+        sep = cdata.find(b"\x00")
+        if sep == -1 or sep + 2 > len(cdata) or cdata[sep + 1] != 0:
+            return None
+        zraw = _zlib_decompress_exact(cdata[sep + 2:])
+        if zraw is None:
+            return None
+        return [cdata[:sep].decode("latin-1"), zraw.decode("latin-1")]
+    sep1 = cdata.find(b"\x00")
+    if sep1 == -1 or sep1 + 3 > len(cdata):
+        return None
+    comp_flag, comp_method = cdata[sep1 + 1], cdata[sep1 + 2]
+    rest_parts = cdata[sep1 + 3:].split(b"\x00", 2)
+    if len(rest_parts) < 3:
+        return None
+    text_bytes = rest_parts[2]
+    if comp_flag == 1:
+        if comp_method != 0:
+            return None
+        text_bytes = _zlib_decompress_exact(text_bytes)
+        if text_bytes is None:
+            return None
+    elif comp_flag != 0:
+        return None
+    try:
+        return [cdata[:sep1].decode("utf-8"), text_bytes.decode("utf-8")]
+    except UnicodeDecodeError:
+        return None
+
+
+def inspect_png_asset(raw: bytes) -> tuple[str, bool] | None:
+    """Validate PNG magic, chunk CRCs, IHDR, IDAT zlib stream, IEND, and ancillary text chunks.
+
+    Returns (extracted_metadata_text, has_text_metadata), or None if malformed.
+    """
     if not raw.startswith(PNG_MAGIC):
         return None
     pos = len(PNG_MAGIC)
     ihdr: tuple[int, int, int, int, int] | None = None
     seen_iend = False
-    extra_image_chunks = False
+    has_text_meta = False
     idat_parts: list[bytes] = []
     parts: list[str] = []
     while pos + 8 <= len(raw):
@@ -525,7 +412,16 @@ def inspect_png_asset(
             if ctype != b"IHDR" or len(cdata) != 13:
                 return None
             width, height, bit_depth, color_type, comp, flt, interlace = struct.unpack(">IIBBBBB", cdata)
-            if width < 1 or height < 1 or comp != 0 or flt != 0 or interlace != 0:
+            valid_depths = PNG_VALID_BIT_DEPTHS.get(color_type)
+            if (
+                width < 1
+                or height < 1
+                or valid_depths is None
+                or bit_depth not in valid_depths
+                or comp != 0
+                or flt != 0
+                or interlace not in (0, 1)
+            ):
                 return None
             ihdr = (width, height, bit_depth, color_type, interlace)
             continue
@@ -539,63 +435,31 @@ def inspect_png_asset(
         if ctype == b"IDAT":
             idat_parts.append(cdata)
             continue
-        if ctype in PNG_EXTRA_IMAGE_CHUNKS:
-            extra_image_chunks = True
+        if ctype in PNG_ALLOWED_ANCILLARY_CHUNKS:
             continue
-        if ctype == b"tEXt":
-            if b"\x00" not in cdata:
+        if ctype in PNG_TEXT_CHUNKS:
+            has_text_meta = True
+            decoded = _decode_png_text_chunk(ctype, cdata)
+            if decoded is None:
                 return None
-            parts.append(cdata.replace(b"\x00", b"\n").decode("latin-1"))
-        elif ctype == b"zTXt":
-            sep = cdata.find(b"\x00")
-            if sep == -1 or sep + 2 > len(cdata) or cdata[sep + 1] != 0:
-                return None
-            parts.append(cdata[:sep].decode("latin-1"))
-            zraw = _zlib_decompress_exact(cdata[sep + 2:])
-            if zraw is None:
-                return None
-            parts.append(zraw.decode("latin-1"))
-        elif ctype == b"iTXt":
-            sep1 = cdata.find(b"\x00")
-            if sep1 == -1 or sep1 + 3 > len(cdata):
-                return None
-            comp_flag, comp_method = cdata[sep1 + 1], cdata[sep1 + 2]
-            rest_parts = cdata[sep1 + 3:].split(b"\x00", 2)
-            if len(rest_parts) < 3:
-                return None
-            text_bytes = rest_parts[2]
-            if comp_flag == 1:
-                if comp_method != 0:
-                    return None
-                text_bytes = _zlib_decompress_exact(text_bytes)
-                if text_bytes is None:
-                    return None
-            elif comp_flag != 0:
-                return None
-            try:
-                parts.append(cdata[:sep1].decode("utf-8"))
-                parts.append(text_bytes.decode("utf-8"))
-            except UnicodeDecodeError:
-                return None
-        else:
-            return None
+            parts.extend(decoded)
+            continue
+        return None
     if ihdr is None or not seen_iend or pos != len(raw) or not idat_parts:
         return None
     decomp = _zlib_decompress_exact(b"".join(idat_parts))
     if decomp is None:
         return None
     width, height, bit_depth, color_type, interlace = ihdr
-    pixels = unfilter_png_scanlines(decomp, width, height, bit_depth, color_type)
-    if pixels is None:
+    row_bytes = (width * PNG_CHANNELS[color_type] * bit_depth + 7) // 8
+    if interlace == 0 and len(decomp) != (row_bytes + 1) * height:
         return None
-    sig = (width, height, bit_depth, color_type, interlace, hashlib.sha256(pixels).hexdigest())
-    clean_chunks = not extra_image_chunks and not parts
-    return "\n".join(parts), sig, clean_chunks
+    if interlace == 1 and not decomp:
+        return None
+    return "\n".join(parts), has_text_meta
 
 
-def inspect_ico_asset(
-    raw: bytes,
-) -> tuple[str, list[tuple[int, int, int, int, int, str]], bool] | None:
+def inspect_ico_asset(raw: bytes) -> tuple[str, bool] | None:
     """Validate ICO directory structure and embedded PNG frames."""
     if len(raw) < 6:
         return None
@@ -615,8 +479,7 @@ def inspect_ico_asset(
     spans.sort()
     cursor = dir_end
     parts: list[str] = []
-    sigs: list[tuple[int, int, int, int, int, str]] = []
-    clean_all = True
+    has_text_meta = False
     for start, end in spans:
         if start != cursor:
             return None
@@ -627,14 +490,13 @@ def inspect_ico_asset(
         png_info = inspect_png_asset(entry)
         if png_info is None:
             return None
-        png_txt, sig, png_clean = png_info
-        sigs.append(sig)
-        clean_all = clean_all and png_clean
+        png_txt, png_meta = png_info
+        has_text_meta = has_text_meta or png_meta
         if png_txt:
             parts.append(png_txt)
     if cursor != len(raw):
         return None
-    return "\n".join(parts), sigs, clean_all
+    return "\n".join(parts), has_text_meta
 
 
 def _decode_site_text(raw: bytes) -> tuple[str, str | None]:
@@ -652,7 +514,7 @@ def _decode_site_text(raw: bytes) -> tuple[str, str | None]:
 
 
 def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
-    """Return ('text', str), ('unapproved_raster', str), ('unapproved_vector', str), ('unapproved_script', str), ('skip', None), or ('unscanned_binary', None)."""
+    """Return ('text', str), ('png_metadata', str), ('skip', None), or ('unscanned_binary', None)."""
     rel = path.relative_to(root).as_posix()
     if not rel.startswith("site/"):
         return "skip", None
@@ -662,37 +524,16 @@ def read_deployed_site_asset(root: Path, path: Path) -> tuple[str, str | None]:
         inspected = inspect_png_asset(raw)
         if inspected is None:
             return "unscanned_binary", None
-        text, sig, clean_chunks = inspected
-        if clean_chunks and [sig] == APPROVED_SITE_RASTERS.get(rel):
-            return "text", text
-        return "unapproved_raster", text
+        text, has_text_meta = inspected
+        return ("png_metadata", text) if has_text_meta else ("text", text)
     if suffix == ".ico":
         inspected = inspect_ico_asset(raw)
         if inspected is None:
             return "unscanned_binary", None
-        text, sigs, clean_chunks = inspected
-        if clean_chunks and sigs == APPROVED_SITE_RASTERS.get(rel):
-            return "text", text
-        return "unapproved_raster", text
-    if suffix == ".svg":
-        text_status, text = _decode_site_text(raw)
-        if text_status != "text" or text is None:
-            return "unscanned_binary", None
-        if hashlib.sha256(raw).hexdigest() == APPROVED_SITE_VECTOR_FILES.get(rel):
-            return "text", text
-        return "unapproved_vector", text
-    if suffix in SITE_SCRIPT_SUFFIXES:
-        text_status, text = _decode_site_text(raw)
-        if text_status != "text" or text is None:
-            return "unscanned_binary", None
-        if hashlib.sha256(raw).hexdigest() == APPROVED_SITE_SCRIPT_FILES.get(rel):
-            return "text", text
-        return "unapproved_script", text
+        text, has_text_meta = inspected
+        return ("png_metadata", text) if has_text_meta else ("text", text)
     if suffix in ALLOWED_SITE_TEXT_SUFFIXES:
-        text_status, text = _decode_site_text(raw)
-        if text_status != "text" or text is None:
-            return "unscanned_binary", None
-        return "text", text
+        return _decode_site_text(raw)
     return "unscanned_binary", None
 
 
@@ -767,7 +608,6 @@ JS_ESCAPE_RE = re.compile(
 )
 CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?")
 LINE_CONTINUATION_RE = re.compile(r"\\(?:\r\n|[\r\n\f])")
-INLINE_DISPLAY_RE = re.compile(r"(?i)\bdisplay\s*:\s*(?:inline(?:-[a-z-]+)?|contents)\b")
 HTML_BLOCK_TAGS = {
     "address", "article", "aside", "blockquote", "body", "br", "caption", "dd",
     "details", "dialog", "div", "dl", "dt", "fieldset", "figcaption", "figure",
@@ -777,68 +617,6 @@ HTML_BLOCK_TAGS = {
     "summary", "table", "tbody", "td", "template", "tfoot", "th", "thead",
     "title", "tr", "ul", "text",
 }
-HTML_VOID_TAGS = {
-    "area", "base", "br", "col", "embed", "hr", "img", "input",
-    "link", "meta", "param", "source", "track", "wbr",
-}
-ALLOWED_SITE_HTML_TAGS = {
-    "a", "article", "aside", "b", "blockquote", "body", "br", "button", "caption",
-    "circle", "code", "dd", "div", "dl", "dt", "em", "footer", "h1", "h2", "h3",
-    "h4", "h5", "h6", "head", "header", "hr", "html", "i", "img", "li", "link",
-    "main", "meta", "nav", "ol", "p", "path", "pre", "rect", "s", "script",
-    "section", "small", "span", "strong", "style", "sub", "sup", "svg",
-    "table", "tbody", "td", "tfoot", "th", "thead", "time", "title", "tr", "u", "ul", "wbr",
-}
-SIMPLE_COMPOUND_RE = re.compile(
-    r"^(?:[a-zA-Z][a-zA-Z0-9-]*)?(?:(?:#[a-zA-Z0-9_-]+)|(?:\.[a-zA-Z0-9_-]+)|(?:\[[a-zA-Z0-9_-]+(?:=[a-zA-Z0-9_\"'-]+)?\]))*$"
-)
-DISALLOWED_SITE_CSS_RE = [
-    (re.compile(r"(?i)@import\b"), "CSS @import external stylesheet"),
-    (re.compile(r"(?i)\burl\s*\("), "CSS url() resource reference"),
-    (re.compile(r"(?i)\bflex-direction\s*:\s*(?:row|column)-reverse\b"), "reverse flex visual ordering"),
-    (re.compile(r"(?i)\bflex-wrap\s*:\s*wrap-reverse\b"), "reverse flex-wrap visual ordering"),
-    (re.compile(r"(?i)(?<![a-z-])direction\s*:\s*rtl\b"), "RTL CSS text direction"),
-    (re.compile(r"(?i)\bunicode-bidi\s*:\s*(?!normal\b)[a-z-]+"), "CSS unicode-bidi override"),
-    (re.compile(r"(?i)\bwriting-mode\s*:\s*(?!horizontal-tb\b)[a-z-]+"), "non-horizontal CSS writing-mode"),
-    (re.compile(r"(?i)(?<![a-z-])float\s*:\s*(?!none\b)[a-z-]+"), "CSS float visual reordering"),
-    (re.compile(r"(?i)(?<![a-z-])(?:left|right|top|bottom|inset(?:-[a-z-]+)?)\s*:\s*(?!auto\b)[^;}]+"), "CSS coordinate offset positioning"),
-    (re.compile(r"(?i)(?<![a-z-])(?:transform|translate)\s*:\s*(?!none\b)[^;}]+"), "CSS transform visual positioning"),
-    (re.compile(r"(?i)\bgrid-(?:template-areas|area)\s*:"), "CSS named grid-area placement"),
-    (re.compile(r"(?i)\bgrid-auto-flow\s*:[^;}]*\bdense\b"), "CSS dense grid auto-placement"),
-    (re.compile(r"(?i)@(?:-[a-z]+-)?keyframes\b"), "CSS @keyframes animation"),
-]
-DISALLOWED_SITE_HTML_RE = [
-    (re.compile(r"(?i)<\s*(?:bdo|bdi)\b"), "HTML bidirectional override element"),
-    (re.compile(r"(?i)\bdir\s*=\s*[\"']?\s*(?:rtl|auto)\b"), "HTML non-LTR dir attribute"),
-    (re.compile(r"(?i)<\s*(?:text|tspan|textPath|foreignObject)\b"), "SVG positioned text or foreignObject element"),
-    (re.compile(r"(?i)<\s*(?:iframe|object|embed)\b"), "embedded browsing context in site/"),
-    (re.compile(r"(?i)<\s*base\b"), "HTML base href element in site/"),
-    (re.compile(r"(?i)<\s*meta\b[^>]*\bhttp-equiv\b"), "HTML meta http-equiv element in site/"),
-    (
-        re.compile(
-            r"(?i)<\s*(?:link\b[^>]*rel\s*=\s*[\"']?[^>]*\bstylesheet\b[^>]*\bhref|script\b[^>]*\bsrc)"
-            r"\s*=\s*[\"']?(?:https?:|//|data:|javascript:|vbscript:)"
-        ),
-        "remote or inline-scheme stylesheet or script in site/",
-    ),
-    (
-        re.compile(r"(?i)<\s*(?:details|dialog|select|option|textarea|input|canvas|audio|video|marquee|math)\b"),
-        "unmodeled interactive or collapsible element in site/",
-    ),
-    (
-        re.compile(
-            r"(?i)<\s*(?:animate|animateMotion|animateTransform|set|discard|use|switch|clipPath|mask|filter|pattern|marker)\b"
-        ),
-        "SVG animation, reference, or masking element in site/",
-    ),
-    (re.compile(r"(?i)<\s*(?:script|style|title)\b[^>]*/>"), "self-closing script or style tag in site/"),
-    (
-        re.compile(
-            r"(?i)<\s*(?:img|source)\b[^>]*\b(?:src|srcset)\s*=\s*[\"']?\s*(?:https?:|//|data:|javascript:|vbscript:)"
-        ),
-        "remote or inline-scheme image source in site/",
-    ),
-]
 
 
 def unescape_js_literals(text: str) -> str:
@@ -913,896 +691,12 @@ def fold_js_expressions(text: str) -> str:
     return "\n".join([folded, *extras]) if extras else folded
 
 
-def _is_safe_grid_track(tok: str) -> bool:
-    """Return True if a CSS grid track sizing token cannot collapse content to zero width."""
-    t = tok.strip().lower()
-    if t in ("auto", "min-content", "max-content"):
-        return True
-    if t.startswith("minmax(") and t.endswith(")"):
-        inner = t[7:-1]
-        depth = 0
-        comma_idx = -1
-        for i, ch in enumerate(inner):
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth = max(0, depth - 1)
-            elif ch == "," and depth == 0:
-                comma_idx = i
-                break
-        if comma_idx == -1:
-            return False
-        min_t = inner[:comma_idx].strip()
-        max_t = inner[comma_idx + 1:].strip()
-        min_ok = min_t in ("0", "0px", "auto", "min-content", "max-content") or _is_safe_grid_track(min_t)
-        return min_ok and _is_safe_grid_track(max_t)
-    m = re.match(r"^(\d+(?:\.\d+)?)(fr|px|em|rem|ch|%)$", t)
-    if not m:
-        return False
-    num, unit = float(m.group(1)), m.group(2)
-    min_val = 0.25 if unit in ("fr", "em", "rem", "ch") else 2.0
-    return num >= min_val
+class _SiteHTMLParser(HTMLParser):
+    """Extract text, attributes, comments, scripts, and local asset links from HTML/SVG."""
 
-
-def count_grid_columns(val: str) -> int | None:
-    """Count static tracks in a CSS grid-template-columns declaration, or -1 if dynamic or zero-width."""
-    v = val.strip().lower()
-    if v in ("none", "auto"):
-        return None
-    parts: list[str] = []
-    depth = 0
-    cur: list[str] = []
-    for ch in v:
-        if ch == "(":
-            depth += 1
-            cur.append(ch)
-        elif ch == ")":
-            depth = max(0, depth - 1)
-            cur.append(ch)
-        elif ch.isspace() and depth == 0:
-            if cur:
-                parts.append("".join(cur))
-                cur = []
-        else:
-            cur.append(ch)
-    if cur:
-        parts.append("".join(cur))
-    total = 0
-    for tok in parts:
-        if tok.startswith("[") and tok.endswith("]"):
-            continue
-        m = re.match(r"^repeat\(\s*(\d+)\s*,\s*(.+)\)$", tok)
-        if m:
-            sub = count_grid_columns(m.group(2))
-            if int(m.group(1)) < 1 or not sub or sub < 1:
-                return -1
-            total += int(m.group(1)) * sub
-        elif tok.startswith("repeat(") or "subgrid" in tok or not _is_safe_grid_track(tok):
-            return -1
-        else:
-            total += 1
-    return total if total >= 1 else -1
-
-
-ALLOWED_SITE_CSS_PROPS = {
-    "-webkit-font-smoothing",
-    "align-items", "align-self", "animation",
-    "background", "background-color",
-    "border", "border-bottom", "border-color", "border-left", "border-radius", "border-right", "border-top",
-    "box-sizing", "clip", "color", "content", "counter-increment", "counter-reset", "cursor",
-    "display", "fill", "flex", "flex-direction", "flex-wrap",
-    "font", "font-family", "font-size", "font-style", "font-weight",
-    "gap", "row-gap", "column-gap",
-    "grid-column", "grid-column-start", "grid-row", "grid-row-start", "grid-template-columns",
-    "height", "justify-content", "letter-spacing", "line-height", "list-style",
-    "margin", "margin-bottom", "margin-left", "margin-right", "margin-top",
-    "max-height", "max-width", "min-height", "min-width",
-    "opacity", "order", "outline", "outline-offset", "overflow",
-    "padding", "padding-bottom", "padding-left", "padding-right", "padding-top",
-    "position", "stroke", "stroke-linecap", "stroke-linejoin", "stroke-width",
-    "text-align", "text-decoration", "text-decoration-thickness", "text-rendering",
-    "text-transform", "text-underline-offset", "transition", "visibility", "white-space", "width",
-}
-TRANSPARENT_COLOR_RE = re.compile(
-    r"(?i)\btransparent\b|color-mix\("
-    r"|rgba?\([^)]*[,/]\s*0(?:\.0+)?%?\s*\)"
-    r"|hsla?\([^)]*[,/]\s*0(?:\.0+)?%?\s*\)"
-    r"|#(?:[0-9a-f]{3}0|[0-9a-f]{6}00)\b"
-)
-CSS_DYNAMIC_FUNC_RE = re.compile(r"(?i)\b(?:var|calc|min|max|clamp)\(")
-
-
-def parse_style_decls(
-    decl_text: str, allow_zero_scrollbar: bool = False, prelude_sel: str = ""
-) -> tuple[dict[str, tuple[object, bool]], list[str]]:
-    """Parse CSS declarations relevant to visual layout, ordering, and visibility."""
-    props: dict[str, tuple[object, bool]] = {}
-    invalid: list[str] = []
-    raw_decls: dict[str, str] = {}
-    raw_imp: dict[str, bool] = {}
-    small_box_dims: list[str] = []
-    neg_margins: list[str] = []
-
-    def _set_prop(key: str, val: object, is_imp: bool) -> None:
-        prev = props.get(key)
-        if prev is not None and prev[1] and not is_imp:
-            return
-        props[key] = (val, is_imp)
-
-    clean = CSS_COMMENT_RE.sub("", unescape_css_literals(decl_text))
-    if "{" in clean or "}" in clean:
-        invalid.append("nested CSS block inside declarations")
-        return props, invalid
-    sel_norm = re.sub(r"\s+", " ", prelude_sel.strip().lower())
-    for part in clean.split(";"):
-        if ":" not in part:
-            continue
-        k, raw_v = part.split(":", 1)
-        k = k.strip().lower()
-        imp = bool(re.search(r"(?i)!important\s*$", raw_v))
-        v = re.sub(r"(?i)\s*!important\s*$", "", raw_v.strip()).strip()
-        vl = v.lower()
-        if k.startswith("--") and sel_norm not in {":root", "[data-theme=light]", "[data-theme=dark]"}:
-            invalid.append(f"scoped CSS custom property override ({k})")
-            continue
-        if not k.startswith("--") and k not in ALLOWED_SITE_CSS_PROPS:
-            invalid.append(f"unmodeled CSS property ({k})")
-            continue
-        if (k.startswith("--") or k in ("color", "fill")) and TRANSPARENT_COLOR_RE.search(v):
-            invalid.append(f"transparent color hiding ({k})")
-        if imp or not raw_imp.get(k, False):
-            raw_decls[k] = v
-            raw_imp[k] = imp
-        if k.startswith("--"):
-            _set_prop(k, vl, imp)
-        elif k == "display":
-            if vl in {
-                "none", "contents", "block", "inline", "inline-block", "flex",
-                "inline-flex", "grid", "inline-grid", "list-item",
-            }:
-                _set_prop("display", vl, imp)
-            else:
-                invalid.append(f"display:{v[:24]}")
-        elif k == "visibility":
-            if vl in {"visible", "hidden", "collapse"}:
-                _set_prop("visibility", vl, imp)
-            else:
-                invalid.append(f"visibility:{v[:24]}")
-        elif k == "opacity":
-            if re.match(r"^(?:0(?:\.0+)?|\.0+|1(?:\.0+)?|0?\.[2-9]\d*)$", vl):
-                _set_prop("opacity", "0" if float(vl) == 0.0 else vl, imp)
-            else:
-                invalid.append(f"opacity:{v[:24]}")
-        elif k == "position":
-            if vl in {"static", "relative", "absolute"}:
-                _set_prop("position", vl, imp)
-            else:
-                invalid.append(f"position:{v[:24]}")
-        elif k == "clip":
-            if re.match(
-                r"^rect\(\s*0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?(?:\s*,\s*|\s+)0(?:px)?\s*\)$",
-                vl,
-            ):
-                _set_prop("clip", "zero", imp)
-            else:
-                invalid.append(f"clip:{v[:24]}")
-        elif k == "overflow":
-            if vl in {"visible", "hidden"}:
-                _set_prop("overflow", vl, imp)
-            else:
-                invalid.append(f"overflow:{v[:24]}")
-        elif k == "flex":
-            if vl not in {"none", "1", "auto", "0 0 100%", "0 0 auto", "1 1 auto"}:
-                invalid.append(f"flex:{v[:24]}")
-            if re.search(r"(?:^|\s)0(?:\.0+)?(?:px|%|em|rem|ch)?$", vl):
-                _set_prop("zero-box", True, imp)
-        elif k == "color":
-            if (
-                vl in {"inherit", "currentcolor", "var(--ink)", "var(--ink2)", "var(--ink3)", "var(--acc)"}
-                or (vl == "var(--bg)" and sel_norm == ".btn")
-            ):
-                _set_prop("fg-color", vl, imp)
-            else:
-                invalid.append(f"color:{v[:24]}")
-        elif k in ("background", "background-color"):
-            if vl in {"none", "var(--bg)", "var(--surf)", "var(--acc2)"} or (vl == "var(--ink)" and sel_norm == ".btn"):
-                _set_prop("bg-color", vl, imp)
-            else:
-                invalid.append(f"{k}:{v[:24]}")
-        elif k in ("animation", "transition"):
-            if vl != "none":
-                invalid.append(f"{k}:{v[:24]}")
-        elif k == "flex-direction":
-            if vl in {"row", "column"}:
-                _set_prop("flex-direction", vl, imp)
-            else:
-                invalid.append(f"flex-direction:{v[:24]}")
-        elif k == "flex-wrap":
-            if vl in {"nowrap", "wrap"}:
-                _set_prop("flex-wrap", vl, imp)
-            else:
-                invalid.append(f"flex-wrap:{v[:24]}")
-        elif k in ("gap", "row-gap", "column-gap"):
-            if CSS_DYNAMIC_FUNC_RE.search(vl) or "-" in vl:
-                invalid.append(f"{k}:{v[:24]}")
-        elif k == "content":
-            if re.match(r"""^(?:none|normal|""|'')$""", vl):
-                pass
-            elif (
-                sel_norm == ".prin li::before"
-                and re.match(r"""^counter\(\s*p\s*,\s*upper-roman\s*\)\s*(?:"\."|'\.')$""", vl)
-            ):
-                pass
-            else:
-                invalid.append(f"content:{v[:24]}")
-        elif k == "counter-reset":
-            if not (sel_norm == ".prin" and vl == "p"):
-                invalid.append(f"counter-reset:{v[:24]}")
-        elif k == "counter-increment":
-            if not (sel_norm == ".prin li::before" and vl == "p"):
-                invalid.append(f"counter-increment:{v[:24]}")
-        elif k == "list-style":
-            if vl != "none":
-                invalid.append(f"list-style:{v[:24]}")
-        elif k == "font-size":
-            if CSS_DYNAMIC_FUNC_RE.search(vl):
-                invalid.append(f"font-size:{v[:24]}")
-            elif vl == "inherit":
-                pass
-            else:
-                m_fs = re.match(r"^([+-]?\d+(?:\.\d+)?)([a-z%]+)?$", vl)
-                if m_fs:
-                    fs_num = float(m_fs.group(1))
-                    fs_unit = m_fs.group(2) or "px"
-                    min_fs = 0.25 if fs_unit in ("em", "rem", "ch") else 4.0
-                    if fs_num < min_fs:
-                        invalid.append(f"font-size:{v[:24]}")
-                    else:
-                        _set_prop("font-size", vl, imp)
-                else:
-                    invalid.append(f"font-size:{v[:24]}")
-        elif k == "line-height":
-            if CSS_DYNAMIC_FUNC_RE.search(vl):
-                invalid.append(f"line-height:{v[:24]}")
-            else:
-                m_lh = re.match(r"^([+-]?\d+(?:\.\d+)?)$", vl)
-                if m_lh and float(m_lh.group(1)) < 0.5:
-                    invalid.append(f"line-height:{v[:24]}")
-        elif k == "font":
-            if vl != "inherit":
-                stripped_v = re.sub(r"\bvar\(--[a-zA-Z0-9_-]+\)", "", vl)
-                if CSS_DYNAMIC_FUNC_RE.search(stripped_v) or re.search(
-                    r"(?<![\d.])0(?:\.0+)?(?:px|em|rem|%|pt|ch|vw|vh)?(?:\s*/|\s|$)",
-                    stripped_v,
-                ):
-                    invalid.append(f"font:{v[:24]}")
-                else:
-                    _set_prop("font-size", "16px", imp)
-        elif k == "letter-spacing":
-            if CSS_DYNAMIC_FUNC_RE.search(vl):
-                invalid.append(f"letter-spacing:{v[:24]}")
-            elif "-" in vl:
-                m_ls = re.match(r"^-(\d*(?:\.\d+)?)([a-z%]+)?$", vl)
-                if not m_ls:
-                    invalid.append(f"letter-spacing:{v[:24]}")
-                else:
-                    ls_num = float(m_ls.group(1))
-                    ls_unit = m_ls.group(2) or "px"
-                    max_neg = 0.05 if ls_unit in ("em", "rem") else (1.0 if ls_unit == "px" else 0.0)
-                    if ls_num > max_neg:
-                        invalid.append(f"letter-spacing:{v[:24]}")
-        elif k in ("margin", "margin-top", "margin-right", "margin-bottom", "margin-left"):
-            if CSS_DYNAMIC_FUNC_RE.search(vl):
-                invalid.append(f"{k}:{v[:24]}")
-            elif "-" in vl and not (sel_norm == "nav.links" and k == "margin" and vl == "0 -20px"):
-                neg_margins.append(f"{k}:{v[:24]}")
-        elif k in ("width", "height", "max-width", "max-height", "min-width", "min-height"):
-            if CSS_DYNAMIC_FUNC_RE.search(vl):
-                invalid.append(f"{k}:{v[:24]}")
-            else:
-                m_dim = re.match(r"^([+-]?\d+(?:\.\d+)?)([a-z%]+)?$", vl)
-                if m_dim:
-                    dim_num = float(m_dim.group(1))
-                    dim_unit = m_dim.group(2) or "px"
-                    min_dim = 0.25 if dim_unit in ("em", "rem", "ch") else 2.0
-                    if dim_num < min_dim:
-                        small_box_dims.append(f"{k}:{v[:24]}")
-                        if k in ("width", "height", "max-width", "max-height"):
-                            _set_prop("zero-box", True, imp)
-        elif k == "order":
-            m = re.match(r"^[+-]?\d+$", v)
-            if m:
-                _set_prop("order", int(m.group(0)), imp)
-            else:
-                invalid.append(f"order:{v[:24]}")
-        elif k in ("grid-row", "grid-row-start", "grid-column", "grid-column-start"):
-            prop_key = "grid-row" if k.startswith("grid-row") else "grid-column"
-            if vl == "auto":
-                _set_prop(prop_key, None, imp)
-            else:
-                m = re.match(r"^(\d+)(?:\s*/\s*(\d+))?$", v)
-                if m and int(m.group(1)) >= 1 and (m.group(2) is None or int(m.group(2)) == int(m.group(1)) + 1):
-                    _set_prop(prop_key, int(m.group(1)), imp)
-                else:
-                    invalid.append(f"{k}:{v[:24]}")
-        elif k == "grid-template-columns":
-            cols = count_grid_columns(v)
-            if cols == -1:
-                invalid.append(f"grid-template-columns:{v[:24]}")
-            elif cols is not None:
-                _set_prop("grid-cols", cols, imp)
-    has_zero_clip = props.get("clip", (None, False))[0] == "zero"
-    has_abs_pos = props.get("position", (None, False))[0] == "absolute"
-    has_sr_only_clip = has_zero_clip and has_abs_pos
-    if has_zero_clip and not has_abs_pos:
-        invalid.append("clip:rect(0,0,0,0) without position:absolute")
-    if has_abs_pos and not has_zero_clip:
-        invalid.append("position:absolute without clip:rect(0,0,0,0)")
-    if props.get("overflow", (None, False))[0] == "hidden" and not has_sr_only_clip:
-        invalid.append("overflow:hidden without clip:rect(0,0,0,0)")
-    if (
-        props.get("flex-direction", (None, False))[0] == "column"
-        and props.get("flex-wrap", (None, False))[0] == "wrap"
-    ):
-        invalid.append("wrapped column flex visual reordering")
-    if small_box_dims and not (has_sr_only_clip or allow_zero_scrollbar):
-        invalid.append(f"sub-2px box dimension hiding ({small_box_dims[0]})")
-    if neg_margins and not (has_sr_only_clip and neg_margins == ["margin:-1px"]):
-        invalid.append(f"negative margin overlap hiding ({neg_margins[0]})")
-    if "color" in raw_decls:
-        c_val = raw_decls["color"].strip().lower()
-        bg_val = (raw_decls.get("background-color") or raw_decls.get("background") or "").strip().lower()
-        if (bg_val and c_val == bg_val) or (c_val == "var(--bg)" and bg_val != "var(--ink)"):
-            invalid.append("foreground color matching background hiding")
-    theme_bgs = {raw_decls[b].strip().lower() for b in ("--bg", "--surf") if b in raw_decls}
-    if theme_bgs and any(
-        raw_decls.get(fg, "").strip().lower() in theme_bgs
-        for fg in ("--ink", "--ink2", "--ink3", "--acc")
-    ):
-        invalid.append("foreground custom property matching background")
-    return props, invalid
-
-
-def _check_css_safety(clean_css: str) -> list[str]:
-    """Flag CSS constructs capable of unanalyzable visual reordering or text injection."""
-    issues: list[str] = []
-    for rx, label in DISALLOWED_SITE_CSS_RE:
-        m = rx.search(clean_css)
-        if m:
-            issues.append(f"{label} ({m.group(0).strip()[:36]})")
-    for m in re.finditer(r"(?i)(?<![a-z-])content\s*:\s*([^;}]+)", clean_css):
-        val = re.sub(r"(?i)\s*!important\s*$", "", m.group(1).strip()).strip()
-        if re.match(r"""^(?:none|normal|""|'')$""", val, re.IGNORECASE):
-            continue
-        if re.match(r"""^counter\(\s*p\s*,\s*upper-roman\s*\)\s*(?:"\."|'\.')$""", val, re.IGNORECASE):
-            continue
-        issues.append(f"CSS content text injection ({val[:36]})")
-    return issues
-
-
-def parse_simple_selector(sel: str):
-    """Parse descendant/child CSS selectors of tags, ids, classes, and attributes."""
-    tokens = [t for t in re.split(r"(\s*>\s*|\s+)", sel.strip()) if t]
-    chain = []
-    comb: str | None = None
-    spec_ids = spec_cls = spec_tags = 0
-    for tok in tokens:
-        if ">" in tok:
-            comb = ">"
-            continue
-        if tok.isspace():
-            if comb is None:
-                comb = " "
-            continue
-        if tok.lower() == ":root":
-            spec_cls += 1
-            chain.append((comb, "html", [], [], []))
-            comb = None
-            continue
-        if not SIMPLE_COMPOUND_RE.match(tok) or tok == "":
-            return None, (0, 0, 0)
-        tag_m = re.match(r"^([a-zA-Z][a-zA-Z0-9-]*)", tok)
-        tag = tag_m.group(1).lower() if tag_m else None
-        if tag:
-            spec_tags += 1
-        ids = re.findall(r"#([a-zA-Z0-9_-]+)", tok)
-        spec_ids += len(ids)
-        classes = re.findall(r"\.([a-zA-Z0-9_-]+)", tok)
-        attrs: list[tuple[str, str | None]] = []
-        for am in re.finditer(r"\[([a-zA-Z0-9_-]+)(?:=([a-zA-Z0-9_\"'-]+))?\]", tok):
-            ak = am.group(1).lower()
-            av = am.group(2).strip("\"'") if am.group(2) is not None else None
-            attrs.append((ak, av))
-        spec_cls += len(classes) + len(attrs)
-        chain.append((comb, tag, ids, classes, attrs))
-        comb = None
-    return (chain if chain else None), (spec_ids, spec_cls, spec_tags)
-
-
-def parse_media_interval(prelude: str) -> tuple[float, float, bool]:
-    """Parse @media pixel-width bounds; mark non-pixel/complex queries unresolvable."""
-    q = prelude.strip()
-    if q.lower().startswith("@media"):
-        q = q[6:].strip()
-    if not q or "," in q or " or " in f" {q.lower()} ":
-        return 0.0, float("inf"), True
-    parts = [p.strip() for p in re.split(r"(?i)\band\b", q) if p.strip()]
-    lo, hi = 0.0, float("inf")
-    unres = False
-    for part in parts:
-        pl = part.lower()
-        if pl in ("all", "screen", "only screen", "only all"):
-            continue
-        m = re.match(
-            r"^\(\s*(min-width|max-width|width)\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*px\s*\)$",
-            pl,
-        )
-        if m:
-            kind, val = m.group(1), float(m.group(2))
-            if kind == "min-width":
-                lo = max(lo, val)
-            elif kind == "max-width":
-                hi = min(hi, val)
-            else:
-                lo = max(lo, val)
-                hi = min(hi, val)
-            continue
-        m_cmp = re.match(
-            r"^\(\s*width\s*(<=|>=|<|>|=)\s*([0-9]+(?:\.[0-9]+)?)\s*px\s*\)$",
-            pl,
-        )
-        if m_cmp:
-            op, val = m_cmp.group(1), float(m_cmp.group(2))
-            if op == "<=":
-                hi = min(hi, val)
-            elif op == "<":
-                hi = min(hi, max(0.0, val - 0.1))
-            elif op == ">=":
-                lo = max(lo, val)
-            elif op == ">":
-                lo = max(lo, val + 0.1)
-            else:
-                lo = max(lo, val)
-                hi = min(hi, val)
-            continue
-        unres = True
-    return lo, hi, unres
-
-
-def parse_css_stylesheet(
-    css_text: str,
-    media_iv: tuple[float, float] = (0.0, float("inf")),
-    unresolvable_cond: bool = False,
-    start_idx: int = 0,
-    in_at_rule: bool = False,
-) -> tuple[list, list[str], int]:
-    """Parse stylesheet rules for visual-order reconstruction and flag unsafe layout rules."""
-    clean = CSS_COMMENT_RE.sub("", unescape_css_literals(css_text))
-    rules: list = []
-    issues: list[str] = [] if in_at_rule else _check_css_safety(clean)
-    idx = start_idx
-    layout_keys = {
-        "display", "order", "grid-row", "grid-column", "grid-cols",
-        "visibility", "opacity", "position", "clip", "overflow", "bg-color",
-        "flex-direction", "flex-wrap",
-    }
-    i, n = 0, len(clean)
-    while i < n:
-        semi = clean.find(";", i)
-        brace = clean.find("{", i)
-        if semi != -1 and (brace == -1 or semi < brace):
-            stmt = clean[i:semi].strip()
-            if stmt and not re.match(r'(?i)^@charset\s+"utf-8"$', stmt):
-                issues.append(f"unmodeled CSS statement ({stmt[:36]})")
-            i = semi + 1
-            continue
-        if brace == -1:
-            rem = clean[i:].strip()
-            if rem:
-                issues.append(f"unmodeled trailing CSS text ({rem[:36]})")
-            break
-        prelude = clean[i:brace].strip()
-        depth = 1
-        j = brace + 1
-        while j < n and depth > 0:
-            if clean[j] == "{":
-                depth += 1
-            elif clean[j] == "}":
-                depth -= 1
-            j += 1
-        body = clean[brace + 1:j - 1]
-        i = j
-        if not prelude:
-            continue
-        if prelude.startswith("@"):
-            pl_low = prelude.lower()
-            if pl_low.startswith("@media"):
-                c_lo, c_hi, c_unres = parse_media_interval(prelude)
-                sub_iv = (max(media_iv[0], c_lo), min(media_iv[1], c_hi))
-                sub_rules, sub_issues, idx = parse_css_stylesheet(
-                    body,
-                    media_iv=sub_iv,
-                    unresolvable_cond=unresolvable_cond or c_unres,
-                    start_idx=idx,
-                    in_at_rule=True,
-                )
-                rules.extend(sub_rules)
-                issues.extend(sub_issues)
-            elif pl_low.startswith(("@supports", "@layer", "@container", "@scope", "@starting-style")):
-                sub_rules, sub_issues, idx = parse_css_stylesheet(
-                    body,
-                    media_iv=media_iv,
-                    unresolvable_cond=True,
-                    start_idx=idx,
-                    in_at_rule=True,
-                )
-                rules.extend(sub_rules)
-                issues.extend(sub_issues)
-            else:
-                issues.append(f"unmodeled CSS at-rule ({prelude[:36]})")
-            continue
-        props, bad_vals = parse_style_decls(
-            body,
-            allow_zero_scrollbar=(prelude.strip().lower() == "::-webkit-scrollbar"),
-            prelude_sel=prelude,
-        )
-        issues.extend(f"non-literal CSS visual-order value ({bv})" for bv in bad_vals)
-        fs_val = props.get("font-size", ("", False))[0]
-        has_zero_font = isinstance(fs_val, str) and bool(re.match(r"^0(?:\.0+)?(?:[a-z%]+)?$", fs_val))
-        has_layout_prop = has_zero_font or any(k in props for k in layout_keys)
-        if has_layout_prop and unresolvable_cond:
-            issues.append(f"non-pixel conditional layout rule ({prelude[:36]})")
-        sel_parts: list[str] = []
-        s_cur: list[str] = []
-        s_depth = 0
-        for ch in prelude:
-            if ch in "([":
-                s_depth += 1
-                s_cur.append(ch)
-            elif ch in ")]":
-                s_depth = max(0, s_depth - 1)
-                s_cur.append(ch)
-            elif ch == "," and s_depth == 0:
-                sel_parts.append("".join(s_cur).strip())
-                s_cur = []
-            else:
-                s_cur.append(ch)
-        if s_cur:
-            sel_parts.append("".join(s_cur).strip())
-        for sel in sel_parts:
-            if not sel:
-                continue
-            chain, spec = parse_simple_selector(sel)
-            if chain is None:
-                if has_layout_prop:
-                    issues.append(f"complex CSS visual-order selector ({sel[:36]})")
-            else:
-                idx += 1
-                rules.append((chain, spec, idx, props, media_iv))
-    return rules, issues, idx
-
-
-class _DOMNode:
-    def __init__(self, tag: str, attrs: dict[str, str], parent: "_DOMNode | None" = None) -> None:
-        self.tag = tag
-        self.attrs = attrs
-        self.parent = parent
-        self.children: list[str | _DOMNode] = []
-        self.classes = set(attrs.get("class", "").split())
-        self.id = attrs.get("id", "")
-
-
-def _matches_compound(node: _DOMNode, tag, ids, classes, attrs) -> bool:
-    if tag and node.tag != tag:
-        return False
-    if any(i != node.id for i in ids):
-        return False
-    if any(c not in node.classes for c in classes):
-        return False
-    for ak, av in attrs:
-        if ak not in node.attrs:
-            return False
-        if av is not None and node.attrs[ak] != av:
-            return False
-    return True
-
-
-def _matches_chain(node: _DOMNode, chain) -> bool:
-    if not _matches_compound(node, *chain[-1][1:]):
-        return False
-    cur = node
-    for idx in range(len(chain) - 1, 0, -1):
-        comb = chain[idx][0]
-        target = chain[idx - 1][1:]
-        if comb == ">":
-            if cur.parent is None or cur.parent.tag == "__root__" or not _matches_compound(cur.parent, *target):
-                return False
-            cur = cur.parent
-        else:
-            anc = cur.parent
-            while anc is not None and anc.tag != "__root__":
-                if _matches_compound(anc, *target):
-                    break
-                anc = anc.parent
-            else:
-                return False
-            cur = anc
-    return True
-
-
-def compute_node_style(
-    node: _DOMNode, rules: list | tuple, viewport_w: float | None = None
-) -> dict[str, object]:
-    """Compute cascaded CSS properties on a DOM node using selector specificity and viewport width."""
-    resolved: dict[str, tuple[tuple[int, int, int, int, int, int], object]] = {}
-    for chain, spec, r_idx, props, (lo, hi) in rules:
-        if viewport_w is None:
-            if lo > 0.0 or hi < float("inf"):
-                continue
-        elif not (lo <= viewport_w <= hi):
-            continue
-        if _matches_chain(node, chain):
-            for prop, (val, imp) in props.items():
-                rank = (1 if imp else 0, 0, spec[0], spec[1], spec[2], r_idx)
-                if prop not in resolved or rank >= resolved[prop][0]:
-                    resolved[prop] = (rank, val)
-    inline_s = node.attrs.get("style", "")
-    if inline_s:
-        iprops, _ = parse_style_decls(inline_s)
-        for prop, (val, imp) in iprops.items():
-            rank = (1 if imp else 0, 1, 0, 0, 0, 10**9)
-            if prop not in resolved or rank >= resolved[prop][0]:
-                resolved[prop] = (rank, val)
-    return {k: v[1] for k, v in resolved.items()}
-
-
-def _omits_layout_box(node: _DOMNode, st: dict[str, object]) -> bool:
-    if node.tag in ("template", "script", "style", "noscript", "svg", "defs", "symbol", "desc", "metadata"):
-        return True
-    if st.get("display") == "none":
-        return True
-    if "hidden" in node.attrs and st.get("display") in (None, "none"):
-        return True
-    if st.get("position") == "absolute" and st.get("clip") == "zero":
-        return True
-    return False
-
-
-def _suppresses_subtree_paint(st: dict[str, object]) -> bool:
-    if st.get("opacity") in ("0", "0.0", ".0"):
-        return True
-    if st.get("overflow") == "hidden" and bool(st.get("zero-box")):
-        return True
-    return False
-
-
-def _next_inherited_state(
-    st: dict[str, object],
-    inh: tuple[str, bool, str, str],
-) -> tuple[str, bool, str, str]:
-    inh_vis, inh_zero_fs, inh_fg, inh_bg = inh
-    vis = str(st["visibility"]) if st.get("visibility") in ("visible", "hidden", "collapse") else inh_vis
-    fs = st.get("font-size")
-    if isinstance(fs, str) and re.match(r"^0(?:\.0+)?(?:[a-z%]+)?$", fs):
-        zero_fs = True
-    elif isinstance(fs, str) and fs:
-        zero_fs = True if (inh_zero_fs and bool(re.search(r"(?:%|(?<!r)em|ex|ch)$", fs))) else False
-    else:
-        zero_fs = inh_zero_fs
-    fg = str(st["fg-color"]) if st.get("fg-color") not in (None, "inherit", "currentcolor") else inh_fg
-    bg = str(st["bg-color"]) if st.get("bg-color") not in (None, "none") else inh_bg
-    return (vis, zero_fs, fg, bg)
-
-
-def _is_text_hidden(inh: tuple[str, bool, str, str]) -> bool:
-    vis, zero_fs, fg, bg = inh
-    if vis in ("hidden", "collapse") or zero_fs:
-        return True
-    if fg == "var(--bg)" and bg != "var(--ink)":
-        return True
-    if fg and bg and fg == bg:
-        return True
-    return False
-
-
-_TABLE_SECTION_ORDER = {
-    "caption": 0,
-    "colgroup": 1,
-    "col": 1,
-    "thead": 2,
-    "tbody": 3,
-    "tr": 3,
-    "tfoot": 4,
-}
-
-
-def _to_upper_roman(num: int) -> str:
-    """Format a positive integer in uppercase Roman numerals matching CSS counter(p, upper-roman)."""
-    out: list[str] = []
-    rem = max(1, min(num, 3999))
-    for val, sym in (
-        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
-        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
-        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
-    ):
-        while rem >= val:
-            out.append(sym)
-            rem -= val
-    return "".join(out)
-
-
-def serialize_visual_tree(
-    root_node: _DOMNode,
-    rules: list | tuple,
-    viewport_w: float | None,
-    respect_order: bool,
-    skip_hidden: bool,
-    i18n_map: dict[str, str] | None = None,
-    include_pseudo: bool = False,
-) -> tuple[str, str]:
-    """Serialize DOM text in computed visual order (flex order, grid tracks, table sections)."""
-    fused: list[str] = []
-    compact: list[str] = []
-    prin_counter = [0]
-    root_inh: tuple[str, bool, str, str] = ("visible", False, "", "")
-
-    def expand_children(
-        container: _DOMNode, inh: tuple[str, bool, str, str]
-    ) -> list[tuple[str, object, dict[str, object], tuple[str, bool, str, str]]]:
-        items: list[tuple[str, object, dict[str, object], tuple[str, bool, str, str]]] = []
-        for ch in container.children:
-            if isinstance(ch, str):
-                if ch and not (skip_hidden and _is_text_hidden(inh)):
-                    items.append(("text", ch, {}, inh))
-            else:
-                st = compute_node_style(ch, rules, viewport_w)
-                if skip_hidden and _omits_layout_box(ch, st):
-                    continue
-                ch_inh = _next_inherited_state(st, inh)
-                if respect_order and st.get("display") == "contents":
-                    if skip_hidden and _suppresses_subtree_paint(st):
-                        continue
-                    items.extend(expand_children(ch, ch_inh))
-                else:
-                    items.append(("node", ch, st, ch_inh))
-        if not respect_order:
-            return items
-        if container.tag == "table":
-            meaningful = [
-                (idx, kind, obj, st, item_inh)
-                for idx, (kind, obj, st, item_inh) in enumerate(items)
-                if not (kind == "text" and isinstance(obj, str) and not obj.strip())
-            ]
-            meaningful.sort(
-                key=lambda x: (
-                    _TABLE_SECTION_ORDER.get(x[2].tag, 5) if isinstance(x[2], _DOMNode) else 5,
-                    x[0],
-                )
-            )
-            return [(k, o, s, ii) for _, k, o, s, ii in meaningful]
-
-        parent_st = compute_node_style(container, rules, viewport_w) if container.tag != "__root__" else {}
-        disp = str(parent_st.get("display", "")).lower()
-        is_flex = "flex" in disp
-        is_grid = "grid" in disp
-        if not (is_flex or is_grid):
-            return items
-
-        meaningful_items: list[list[object]] = []
-        for idx, (kind, obj, st, item_inh) in enumerate(items):
-            if kind == "text" and isinstance(obj, str) and not obj.strip():
-                continue
-            raw_ord = st.get("order", 0)
-            ord_val = raw_ord if isinstance(raw_ord, int) else 0
-            raw_gr = st.get("grid-row")
-            gr = raw_gr if isinstance(raw_gr, int) else None
-            raw_gc = st.get("grid-column")
-            gc = raw_gc if isinstance(raw_gc, int) else None
-            meaningful_items.append([idx, kind, obj, st, ord_val, gr, gc, item_inh])
-
-        if is_flex:
-            meaningful_items.sort(key=lambda x: (int(x[4]), int(x[0])))  # type: ignore[arg-type]
-            return [(m[1], m[2], m[3], m[7]) for m in meaningful_items]  # type: ignore[misc]
-
-        explicit_cols = [m[6] for m in meaningful_items if isinstance(m[6], int)]
-        parent_cols = parent_st.get("grid-cols")
-        ncols = parent_cols if isinstance(parent_cols, int) and parent_cols >= 1 else max([1, *explicit_cols])
-        occupied: set[tuple[int, int]] = set()
-        for m in meaningful_items:
-            if isinstance(m[5], int) and isinstance(m[6], int):
-                r, c = m[5], m[6]
-                ncols = max(ncols, c)
-                occupied.add((r, c))
-        for m in sorted(meaningful_items, key=lambda x: (int(x[4]), int(x[0]))):  # type: ignore[arg-type]
-            if isinstance(m[5], int) and m[6] is None:
-                r = m[5]
-                c = 1
-                while (r, c) in occupied:
-                    c += 1
-                m[6] = c
-                ncols = max(ncols, c)
-                occupied.add((r, c))
-        cur_r, cur_c = 1, 1
-        for m in sorted(meaningful_items, key=lambda x: (int(x[4]), int(x[0]))):  # type: ignore[arg-type]
-            if m[5] is None:
-                if isinstance(m[6], int):
-                    c = m[6]
-                    ncols = max(ncols, c)
-                    r = cur_r if c >= cur_c else cur_r + 1
-                    while (r, c) in occupied:
-                        r += 1
-                    m[5] = r
-                    occupied.add((r, c))
-                    cur_r, cur_c = r, c + 1
-                    if cur_c > ncols:
-                        cur_r += 1
-                        cur_c = 1
-                else:
-                    while (cur_r, cur_c) in occupied:
-                        cur_c += 1
-                        if cur_c > ncols:
-                            cur_r += 1
-                            cur_c = 1
-                    m[5], m[6] = cur_r, cur_c
-                    occupied.add((cur_r, cur_c))
-                    cur_c += 1
-                    if cur_c > ncols:
-                        cur_r += 1
-                        cur_c = 1
-        meaningful_items.sort(key=lambda x: (int(x[5]), int(x[6]), int(x[4]), int(x[0])))  # type: ignore[arg-type]
-        return [(m[1], m[2], m[3], m[7]) for m in meaningful_items]  # type: ignore[misc]
-
-    def walk(node: _DOMNode, st: dict[str, object], inh: tuple[str, bool, str, str]) -> None:
-        if skip_hidden and node.tag != "__root__" and _suppresses_subtree_paint(st):
-            return
-        if include_pseudo and node.tag != "__root__":
-            if "prin" in node.classes:
-                prin_counter[0] = 0
-            elif node.tag == "li":
-                anc = node.parent
-                while anc is not None and anc.tag != "__root__":
-                    if "prin" in anc.classes:
-                        prin_counter[0] += 1
-                        if not (skip_hidden and _is_text_hidden(inh)):
-                            pfx = f"{_to_upper_roman(prin_counter[0])}."
-                            fused.append(pfx)
-                            compact.append(pfx)
-                        break
-                    anc = anc.parent
-        if i18n_map and node.tag != "__root__":
-            k_txt = node.attrs.get("data-i18n")
-            k_htm = node.attrs.get("data-i18n-html")
-            if k_txt and i18n_map.get(k_txt):
-                if not (skip_hidden and _is_text_hidden(inh)):
-                    val = i18n_map[k_txt]
-                    fused.append(val)
-                    if val.strip():
-                        compact.append(val.strip())
-                return
-            if k_htm and i18n_map.get(k_htm):
-                if not (skip_hidden and _is_text_hidden(inh)):
-                    val = re.sub(r"<[^>]+>", "", i18n_map[k_htm])
-                    fused.append(val)
-                    if val.strip():
-                        compact.append(val.strip())
-                return
-        for kind, obj, ch_st, ch_inh in expand_children(node, inh):
-            if kind == "text" and isinstance(obj, str):
-                fused.append(obj)
-                if obj.strip():
-                    compact.append(obj.strip())
-            elif isinstance(obj, _DOMNode):
-                walk(obj, ch_st, ch_inh)
-
-    walk(root_node, {}, root_inh)
-    return "".join(fused), "".join(compact)
-
-
-class _RenderedHTMLNormalizer(HTMLParser):
-    def __init__(self, depth: int = 0, xml_mode: bool = False, page_rel: str = "site/index.html") -> None:
+    def __init__(self, depth: int = 0, page_rel: str = "site/index.html") -> None:
         super().__init__(convert_charrefs=True)
         self.depth = depth
-        self.xml_mode = xml_mode
         self.page_rel = page_rel
         self.inline_parts: list[str] = []
         self.fused_parts: list[str] = []
@@ -1810,172 +704,97 @@ class _RenderedHTMLNormalizer(HTMLParser):
         self.attr_lines: list[str] = []
         self.comment_lines: list[str] = []
         self.subtrees: list[str] = []
-        self.stylesheet_entries: list[tuple[str, str, str]] = []
-        self.script_tags: list[tuple[str | None, str]] = []
-        self.inline_css_issues: list[str] = []
-        self.html_issues: list[str] = []
-        self.dom_root = _DOMNode("__root__", {})
-        self._dom_stack: list[_DOMNode] = [self.dom_root]
-        self._tag_stack: list[tuple[str, bool]] = []
+        self.style_blocks: list[str] = []
+        self.asset_refs: list[tuple[str, str]] = []
+        self.element_ids: set[str] = set()
+        self.html_issues: list[tuple[str, str]] = []
         self._raw_tag: str | None = None
         self._raw_chunks: list[str] = []
-        self._raw_media: str = ""
-        self._raw_src: str | None = None
 
-    def _collect_attrs(self, tag: str, attrs: list[tuple[str, str | None]]) -> dict[str, str]:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if t in HTML_BLOCK_TAGS:
+            self.inline_parts.append("\n")
         ad: dict[str, str] = {}
-        if tag not in ALLOWED_SITE_HTML_TAGS:
-            self.html_issues.append(f"unmodeled HTML element in site/ (<{tag}>)")
         for k, v in attrs:
             kl = k.lower()
             if kl in ad:
-                self.html_issues.append(f"duplicate HTML attribute in site/ ({kl})")
+                self.html_issues.append(("publish", f"duplicate HTML attribute in site/ ({kl})"))
                 continue
             ad[kl] = v if v is not None else ""
-        return ad
-
-    @staticmethod
-    def _has_inline_display(ad: dict[str, str]) -> bool:
-        style_v = ad.get("style", "")
-        return bool(style_v and INLINE_DISPLAY_RE.search(style_v))
-
-    def _handle_attrs(
-        self, tag: str, attrs: list[tuple[str, str | None]], ad: dict[str, str]
-    ) -> None:
-        for k, v in attrs:
-            kl = k.lower()
-            if kl in ("display", "visibility", "opacity", "clip", "clip-path", "transform", "filter", "mask"):
-                self.html_issues.append(f"presentation hiding or layout attribute in site/ ({kl})")
             if re.match(r"^on[a-z]{2,}$", kl):
-                self.html_issues.append(f"inline event handler attribute in site/ ({kl})")
+                self.html_issues.append(("publish", f"inline event handler attribute in site/ ({kl})"))
             if not v:
                 continue
             compact_val = re.sub(r"[\x00-\x20]+", "", v)
             unq_compact = re.sub(r"[\x00-\x20]+", "", urllib.parse.unquote(compact_val))
             for chk_val in (compact_val, unq_compact):
                 if re.match(r"^(?:javascript|vbscript):", chk_val, re.IGNORECASE):
-                    self.html_issues.append("javascript: or vbscript: URI attribute in site/")
-                if re.match(r"^data:", chk_val, re.IGNORECASE):
-                    self.html_issues.append("embedded data URI asset requires direct file scan")
+                    self.html_issues.append(("publish", "javascript: or vbscript: URI attribute in site/"))
+                elif re.match(r"^data:", chk_val, re.IGNORECASE):
+                    self.html_issues.append(("publish", "embedded data URI asset requires direct file scan"))
             self.attr_lines.append(f"{k}={v}")
             if "%" in v:
                 self.attr_lines.append(f"{k}={urllib.parse.unquote(v)}")
-            if kl == "style":
-                clean_s = CSS_COMMENT_RE.sub("", unescape_css_literals(v))
-                self.inline_css_issues.extend(_check_css_safety(clean_s))
-                _, bad_vals = parse_style_decls(clean_s)
-                self.inline_css_issues.extend(f"non-literal CSS visual-order value ({bv})" for bv in bad_vals)
             if kl == "srcdoc" and self.depth < 3:
                 self.subtrees.append(normalize_html_text(v, self.depth + 1, page_rel=self.page_rel))
-        if tag == "link" and "href" in ad:
-            if resolve_site_asset_href(self.page_rel, ad["href"]) is None:
-                self.html_issues.append(f"remote or inline-scheme stylesheet or link in site/ ({ad['href'][:36]})")
-        elif tag == "script" and "src" in ad:
-            if resolve_site_asset_href(self.page_rel, ad["src"]) is None:
-                self.html_issues.append(f"remote or inline-scheme stylesheet or script in site/ ({ad['src'][:36]})")
-        elif tag == "img":
-            if "src" in ad and resolve_site_asset_href(self.page_rel, ad["src"]) is None:
-                self.html_issues.append(f"remote or inline-scheme image source in site/ ({ad['src'][:36]})")
+        if ad.get("id"):
+            self.element_ids.add(ad["id"])
+        if t == "link" and "href" in ad:
+            rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
+            if rel_tokens & {"stylesheet", "icon", "apple-touch-icon", "manifest"}:
+                self.asset_refs.append(("link", ad["href"]))
+        elif t == "script" and "src" in ad:
+            self.asset_refs.append(("script", ad["src"]))
+        elif t == "img":
+            if "src" in ad:
+                self.asset_refs.append(("img", ad["src"]))
             if "srcset" in ad:
                 for cand in ad["srcset"].split(","):
                     parts = cand.strip().split()
-                    if not parts or resolve_site_asset_href(self.page_rel, parts[0]) is None:
-                        self.html_issues.append("remote or inline-scheme image source in site/ (srcset)")
-                        break
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        t = tag.lower()
-        ad = self._collect_attrs(t, attrs)
-        node = _DOMNode(t, ad, parent=self._dom_stack[-1])
-        self._dom_stack[-1].children.append(node)
-        if t not in HTML_VOID_TAGS:
-            self._dom_stack.append(node)
-        is_block = (t in HTML_BLOCK_TAGS) and not self._has_inline_display(ad)
-        self._tag_stack.append((t, is_block))
-        if is_block:
-            self.inline_parts.append("\n")
-        self._handle_attrs(t, attrs, ad)
-        if t == "link":
-            rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
-            if "stylesheet" in rel_tokens:
-                self.stylesheet_entries.append(("link", ad.get("href", "").strip(), ad.get("media", "").strip()))
-        elif t == "style":
-            self._raw_tag = t
-            self._raw_chunks = []
-            self._raw_media = ad.get("media", "").strip()
-        elif t == "script":
-            self._raw_tag = t
-            self._raw_chunks = []
-            self._raw_src = ad["src"] if "src" in ad else None
-        elif t == "title":
-            self.set_cdata_mode("title")
+                    self.asset_refs.append(("img", parts[0] if parts else ""))
+        elif t == "a" and "href" in ad:
+            self.asset_refs.append(("anchor", ad["href"]))
+        if t in ("script", "style", "title"):
+            if t == "title":
+                self.set_cdata_mode("title")
             self._raw_tag = t
             self._raw_chunks = []
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
-        in_svg = self.xml_mode or any(st_tag == "svg" for st_tag, _ in self._tag_stack)
-        if t in ("script", "style", "title") or (not in_svg and t not in HTML_VOID_TAGS):
-            if t in ("script", "style", "title"):
-                self.set_cdata_mode(t)
-            self.handle_starttag(tag, attrs)
-            return
-        ad = self._collect_attrs(t, attrs)
-        node = _DOMNode(t, ad, parent=self._dom_stack[-1])
-        self._dom_stack[-1].children.append(node)
-        if (t in HTML_BLOCK_TAGS) and not self._has_inline_display(ad):
-            self.inline_parts.append("\n")
-        self._handle_attrs(t, attrs, ad)
-        if t == "link":
-            rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
-            if "stylesheet" in rel_tokens:
-                self.stylesheet_entries.append(("link", ad.get("href", "").strip(), ad.get("media", "").strip()))
-        elif t == "script":
-            self.script_tags.append((ad["src"] if "src" in ad else None, ""))
+        if t in ("script", "style", "title"):
+            self.html_issues.append(("publish", "self-closing script or style tag in site/"))
+            self.set_cdata_mode(t)
+        self.handle_starttag(tag, attrs)
 
     def _flush_raw_tag(self, tag_name: str) -> None:
         raw_body = "".join(self._raw_chunks)
         if tag_name == "script":
-            self.script_tags.append((self._raw_src, raw_body))
-            self._raw_src = None
             dec = fold_js_expressions(raw_body)
             self.subtrees.append(dec)
             if ("<" in dec or "&" in dec) and self.depth < 3:
                 self.subtrees.append(normalize_html_text(dec, self.depth + 1, page_rel=self.page_rel))
         elif tag_name == "style":
-            self.stylesheet_entries.append(("inline", raw_body, self._raw_media))
-            self._raw_media = ""
+            self.style_blocks.append(unescape_css_literals(raw_body))
             self.subtrees.append(unescape_css_literals(raw_body))
         elif tag_name == "title":
-            if "<" in raw_body:
-                self.html_issues.append("markup inside HTML <title> in site/")
             unesc = html.unescape(raw_body)
             self.inline_parts.append(unesc)
             self.fused_parts.append(unesc)
             if unesc.strip():
                 self.compact_parts.append(unesc.strip())
-            self._dom_stack[-1].children.append(unesc)
         self._raw_tag = None
         self._raw_chunks = []
 
     def handle_pi(self, data: str) -> None:
-        self.html_issues.append("HTML processing instruction in site/")
+        self.html_issues.append(("publish", "HTML processing instruction in site/"))
 
     def handle_endtag(self, tag: str) -> None:
         t = tag.lower()
         if self._raw_tag == t:
             self._flush_raw_tag(t)
-        is_block = t in HTML_BLOCK_TAGS
-        for idx in range(len(self._tag_stack) - 1, -1, -1):
-            if self._tag_stack[idx][0] == t:
-                _, is_block = self._tag_stack[idx]
-                del self._tag_stack[idx:]
-                break
-        for idx in range(len(self._dom_stack) - 1, 0, -1):
-            if self._dom_stack[idx].tag == t:
-                del self._dom_stack[idx:]
-                break
-        if is_block:
+        if t in HTML_BLOCK_TAGS:
             self.inline_parts.append("\n")
 
     def handle_data(self, data: str) -> None:
@@ -1986,7 +805,6 @@ class _RenderedHTMLNormalizer(HTMLParser):
         self.fused_parts.append(data)
         if data.strip():
             self.compact_parts.append(data.strip())
-        self._dom_stack[-1].children.append(data)
 
     def handle_comment(self, data: str) -> None:
         self.comment_lines.append(html.unescape(data))
@@ -1996,270 +814,24 @@ class _RenderedHTMLNormalizer(HTMLParser):
             self.handle_data(data[len("CDATA["):])
 
 
-def _collect_page_stylesheet_rules(
-    page_rel: str,
-    stylesheet_entries: list[tuple[str, str, str]],
-    css_by_rel: dict[str, str] | None = None,
-) -> tuple[list, list[str], set[float]]:
-    """Resolve linked and inline stylesheets for one page in document order."""
-    rules: list = []
-    issues: list[str] = []
-    breakpoints: set[float] = set()
-    idx_base = 0
-    for kind, content, media_attr in stylesheet_entries:
-        if media_attr.strip():
-            m_lo, m_hi, m_unres = parse_media_interval("@media " + media_attr)
-            base_iv: tuple[float, float] = (m_lo, m_hi)
-        else:
-            base_iv = (0.0, float("inf"))
-            m_unres = False
-        css_src = ""
-        if kind == "link":
-            resolved = resolve_site_asset_href(page_rel, content)
-            if resolved is None:
-                issues.append(f"external or escaping stylesheet link ({content[:36]})")
-                continue
-            if not resolved.lower().endswith(".css"):
-                issues.append(f"non-CSS stylesheet link ({content[:36]})")
-                continue
-            if css_by_rel is not None:
-                if resolved not in css_by_rel:
-                    issues.append(f"missing local stylesheet link ({content[:36]})")
-                    continue
-                css_src = css_by_rel[resolved]
-        else:
-            css_src = content
-        if css_src:
-            p_rules, p_issues, idx_base = parse_css_stylesheet(
-                css_src, media_iv=base_iv, unresolvable_cond=m_unres, start_idx=idx_base
-            )
-            rules.extend(p_rules)
-            issues.extend(p_issues)
-            for _, _, _, _, (lo, hi) in p_rules:
-                if 0.0 < lo < float("inf"):
-                    breakpoints.add(lo)
-                if hi < float("inf"):
-                    breakpoints.add(hi)
-    return rules, issues, breakpoints
-
-
-def _collect_active_viewports(all_rules: list, breakpoints: set[float]) -> list[float]:
-    candidates = [320.0, 1440.0]
-    for bp in sorted(breakpoints)[:32]:
-        candidates.extend((max(0.0, bp - 0.5), bp, bp + 0.5))
-    seen_sigs: set[tuple[int, ...]] = set()
-    active_viewports: list[float] = []
-    for vw in candidates:
-        sig = tuple(r_idx for _, _, r_idx, _, (lo, hi) in all_rules if lo <= vw <= hi)
-        if sig not in seen_sigs:
-            seen_sigs.add(sig)
-            active_viewports.append(vw)
-    return active_viewports
-
-
-def _ensure_html_root(parser: _RenderedHTMLNormalizer) -> None:
-    if parser.xml_mode or any(isinstance(c, _DOMNode) and c.tag == "html" for c in parser.dom_root.children):
-        return
-    html_node = _DOMNode("html", {}, parent=parser.dom_root)
-    html_node.children = list(parser.dom_root.children)
-    for ch in html_node.children:
-        if isinstance(ch, _DOMNode):
-            ch.parent = html_node
-    parser.dom_root.children = [html_node]
-
-
-def _iter_runtime_dom_states(parser: _RenderedHTMLNormalizer, page_rel: str):
-    """Yield the initial parsed DOM state followed by all supported theme/locale/menu runtime states."""
-    html_node: _DOMNode | None = None
-    nav_node: _DOMNode | None = None
-    menu_btn: _DOMNode | None = None
-    theme_btn: _DOMNode | None = None
-    lang_btn: _DOMNode | None = None
-    stack: list[_DOMNode] = [c for c in parser.dom_root.children if isinstance(c, _DOMNode)]
-    while stack:
-        node = stack.pop()
-        if html_node is None and node.tag == "html":
-            html_node = node
-        if nav_node is None and node.id == "primary-nav":
-            nav_node = node
-        if menu_btn is None and "js-menu" in node.classes:
-            menu_btn = node
-        if theme_btn is None and "js-theme" in node.classes:
-            theme_btn = node
-        if lang_btn is None and "js-lang" in node.classes:
-            lang_btn = node
-        stack.extend(reversed([c for c in node.children if isinstance(c, _DOMNode)]))
-
-    snapshots: list[tuple[_DOMNode, dict[str, str], list[str | _DOMNode]]] = []
-    seen_ids: set[int] = set()
-    for n in (html_node, nav_node, menu_btn, theme_btn, lang_btn):
-        if n is not None and id(n) not in seen_ids:
-            seen_ids.add(id(n))
-            snapshots.append((n, dict(n.attrs), list(n.children)))
-
-    def _restore() -> None:
-        for n, saved_attrs, saved_children in snapshots:
-            n.attrs = dict(saved_attrs)
-            n.children = list(saved_children)
-
-    yield
-    has_bootstrap_js = any(
-        src is None
-        and raw_body.strip()
-        and hashlib.sha256(raw_body.encode("utf-8")).hexdigest() in APPROVED_SITE_INLINE_SCRIPTS
-        for src, raw_body in parser.script_tags
-    )
-    loads_app_js = any(
-        src is not None and resolve_site_asset_href(page_rel, src) == "site/assets/app.js"
-        for src, _ in parser.script_tags
-    )
-    if not (has_bootstrap_js or loads_app_js):
-        return
-    menus: tuple[str | None, ...] = (
-        ("false", "true") if (loads_app_js and nav_node is not None and menu_btn is not None) else (None,)
-    )
-    try:
-        for theme in ("light", "dark"):
-            for lang in ("en", "zh-CN"):
-                for menu_open in menus:
-                    _restore()
-                    if html_node is not None:
-                        html_node.attrs["data-theme"] = theme
-                        html_node.attrs["lang"] = lang
-                    if loads_app_js:
-                        if theme_btn is not None:
-                            theme_btn.attrs["aria-pressed"] = "true" if theme == "dark" else "false"
-                        if lang_btn is not None:
-                            lang_btn.attrs["lang"] = "en" if lang == "zh-CN" else "zh-CN"
-                            lang_btn.children = ["EN" if lang == "zh-CN" else "中文"]
-                        if menu_open is not None and nav_node is not None and menu_btn is not None:
-                            nav_node.attrs["data-open"] = menu_open
-                            menu_btn.attrs["aria-expanded"] = menu_open
-                    yield
-    finally:
-        _restore()
-
-
-def _check_cascaded_dom_integrity(
-    dom_root: _DOMNode, rules: list | tuple, viewports: list[float | None]
-) -> list[str]:
-    """Validate cascaded properties and explicit grid cell placement across DOM elements."""
-    issues: list[str] = []
-    seen_msgs: set[str] = set()
-
-    def _rec(msg: str) -> None:
-        if msg not in seen_msgs:
-            seen_msgs.add(msg)
-            issues.append(msg)
-
-    stack: list[_DOMNode] = [c for c in dom_root.children if isinstance(c, _DOMNode)]
-    while stack:
-        node = stack.pop()
-        child_nodes = [c for c in node.children if isinstance(c, _DOMNode)]
-        stack.extend(reversed(child_nodes))
-        for vw in viewports:
-            st = compute_node_style(node, rules, vw)
-            has_zero_clip = st.get("clip") == "zero"
-            has_abs_pos = st.get("position") == "absolute"
-            has_sr_only_clip = has_zero_clip and has_abs_pos
-            if has_zero_clip and not has_abs_pos:
-                _rec("clip:rect(0,0,0,0) without position:absolute")
-            if has_abs_pos and not has_zero_clip:
-                _rec("position:absolute without clip:rect(0,0,0,0)")
-            if st.get("overflow") == "hidden" and not has_sr_only_clip:
-                _rec("overflow:hidden without clip:rect(0,0,0,0)")
-            if st.get("flex-direction") == "column" and st.get("flex-wrap") == "wrap":
-                _rec("wrapped column flex visual reordering")
-            if node.tag == "html":
-                theme_bgs = {st.get(b) for b in ("--bg", "--surf")} - {None}
-                if theme_bgs and any(st.get(fg) in theme_bgs for fg in ("--ink", "--ink2", "--ink3", "--acc")):
-                    _rec("foreground custom property matching background")
-            if "grid" in str(st.get("display", "")).lower():
-                used_cells: set[tuple[int, int]] = set()
-                for ch in child_nodes:
-                    ch_st = compute_node_style(ch, rules, vw)
-                    if _omits_layout_box(ch, ch_st):
-                        continue
-                    gr, gc = ch_st.get("grid-row"), ch_st.get("grid-column")
-                    if isinstance(gr, int) and isinstance(gc, int):
-                        if (gr, gc) in used_cells:
-                            _rec("overlapping explicit CSS grid cell placement")
-                        used_cells.add((gr, gc))
-    return issues
-
-
-def normalize_html_text(
-    text: str,
-    depth: int = 0,
-    page_rel: str = "site/index.html",
-    css_by_rel: dict[str, str] | None = None,
-    i18n_maps: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
-) -> str:
-    """Canonicalize rendered HTML/SVG text, CSS visual order, attributes, comments, and scripts."""
-    parser = _RenderedHTMLNormalizer(
-        depth=depth,
-        xml_mode=Path(page_rel).suffix.lower() in (".svg", ".xml", ".xhtml"),
-        page_rel=page_rel,
-    )
+def _parse_site_html(text: str, depth: int = 0, page_rel: str = "site/index.html") -> _SiteHTMLParser:
+    parser = _SiteHTMLParser(depth=depth, page_rel=page_rel)
     parser.feed(text)
     parser.close()
     if parser._raw_tag is not None:
         parser._flush_raw_tag(parser._raw_tag)
-    _ensure_html_root(parser)
-    all_rules, _, breakpoints = _collect_page_stylesheet_rules(
-        page_rel, parser.stylesheet_entries, css_by_rel=css_by_rel
-    )
-    active_viewports = _collect_active_viewports(all_rules, breakpoints)
+    return parser
 
-    rendered_views: list[str] = []
-    seen_rendered: set[str] = set()
-    has_i18n = "data-i18n" in text and bool(i18n_maps)
-    for _ in _iter_runtime_dom_states(parser, page_rel):
-        vis_dom_f, vis_dom_c = serialize_visual_tree(
-            parser.dom_root, all_rules, viewport_w=None, respect_order=False, skip_hidden=True
-        )
-        for v in (vis_dom_f, vis_dom_c):
-            if v not in seen_rendered:
-                seen_rendered.add(v)
-                rendered_views.append(v)
-        for vw in active_viewports:
-            for skip_hidden in (True, False):
-                for inc_pseudo in (False, True):
-                    vf, vc = serialize_visual_tree(
-                        parser.dom_root,
-                        all_rules,
-                        viewport_w=vw,
-                        respect_order=True,
-                        skip_hidden=skip_hidden,
-                        include_pseudo=inc_pseudo,
-                    )
-                    for v in (vf, vc):
-                        if v not in seen_rendered:
-                            seen_rendered.add(v)
-                            rendered_views.append(v)
-                    if has_i18n:
-                        for imap in i18n_maps:
-                            if not imap:
-                                continue
-                            ivf, ivc = serialize_visual_tree(
-                                parser.dom_root,
-                                all_rules,
-                                viewport_w=vw,
-                                respect_order=True,
-                                skip_hidden=skip_hidden,
-                                i18n_map=imap,
-                                include_pseudo=inc_pseudo,
-                            )
-                            for v in (ivf, ivc):
-                                if v not in seen_rendered:
-                                    seen_rendered.add(v)
-                                    rendered_views.append(v)
 
+def normalize_html_text(
+    text: str, depth: int = 0, page_rel: str = "site/index.html"
+) -> str:
+    """Extract rendered HTML/SVG text, attributes, comments, and decoded scripts."""
+    parser = _parse_site_html(text, depth=depth, page_rel=page_rel)
     combined = "\n".join([
         "".join(parser.inline_parts),
         "".join(parser.fused_parts),
         "".join(parser.compact_parts),
-        *rendered_views,
         "\n".join(parser.attr_lines),
         "\n".join(parser.comment_lines),
         *parser.subtrees,
@@ -2267,130 +839,111 @@ def normalize_html_text(
     return INVISIBLE_FORMAT_RE.sub("", combined)
 
 
-def check_site_visual_integrity(
+def check_site_links_and_safety(
+    root: Path,
     rel: str,
     path: Path,
     text: str,
     report: Report,
     seen: set[tuple[str, str]],
-    css_by_rel: dict[str, str] | None = None,
-    script_hashes_by_rel: dict[str, str] | None = None,
 ) -> None:
-    """Reject bidirectional controls and CSS/HTML/script constructs that obscure visual order or bypass static scans."""
-    def _emit(msg: str) -> None:
-        item = ("publish", f"{rel}: {msg} (section 13)")
+    """Validate site/ asset link integrity, local resource resolution, and URI safety."""
+    def _emit(category: str, msg: str) -> None:
+        item = (category, f"{rel}: {msg}")
         if item not in seen:
             seen.add(item)
             report.add(*item)
 
     if BIDI_CONTROL_RE.search(text):
-        _emit("bidirectional control character in published site/ asset")
+        _emit("publish", "bidirectional control character in published site/ asset (section 13)")
+
+    def _check_css_text(css_text: str) -> None:
+        clean_css = CSS_COMMENT_RE.sub("", unescape_css_literals(css_text))
+        if re.search(r"(?i)@import\b", clean_css):
+            _emit("publish", "CSS @import external stylesheet (section 13)")
+        for m in re.finditer(r"(?i)\burl\s*\(\s*([^)]+)\)", clean_css):
+            target = m.group(1).strip().strip("\"'").strip()
+            if not target or target.startswith("#"):
+                continue
+            if re.match(r"^(?:https?:|//|data:|javascript:|vbscript:)", target, re.IGNORECASE):
+                _emit("publish", f"remote or inline-scheme CSS url() resource ({target[:36]}) (section 13)")
+                continue
+            resolved = resolve_site_asset_href(rel, target)
+            if resolved is None:
+                _emit("publish", f"escaping CSS url() resource ({target[:36]}) (section 13)")
+            elif not (root / resolved).is_file():
+                _emit("links", f"broken local CSS asset link -> {target}")
+
     suffix = path.suffix.lower()
     if suffix == ".css":
-        _, issues, _ = parse_css_stylesheet(text)
-        for iss in issues:
-            _emit(iss)
+        _check_css_text(text)
         return
-    if suffix in (".html", ".htm", ".xhtml", ".svg", ".xml"):
-        for rx, label in DISALLOWED_SITE_HTML_RE:
-            m = rx.search(text)
-            if m:
-                _emit(f"{label}: {m.group(0).strip()[:36]}")
-        parser = _RenderedHTMLNormalizer(xml_mode=suffix in (".svg", ".xml", ".xhtml"), page_rel=rel)
-        parser.feed(text)
-        parser.close()
-        if parser._raw_tag is not None:
-            parser._flush_raw_tag(parser._raw_tag)
-        _ensure_html_root(parser)
-        for iss in parser.html_issues:
-            _emit(iss)
-        for iss in parser.inline_css_issues:
-            _emit(iss)
-        all_rules, css_issues, breakpoints = _collect_page_stylesheet_rules(
-            rel, parser.stylesheet_entries, css_by_rel=css_by_rel
-        )
-        for iss in css_issues:
-            _emit(iss)
-        if len(breakpoints) > 32:
-            _emit(f"too many CSS @media breakpoints ({len(breakpoints)} > 32) in site/ page")
-        check_viewports: list[float | None] = [None, *_collect_active_viewports(all_rules, breakpoints)]
-        for _ in _iter_runtime_dom_states(parser, rel):
-            for iss in _check_cascaded_dom_integrity(parser.dom_root, all_rules, check_viewports):
-                _emit(iss)
-        if len(breakpoints) > 32:
-            _emit(f"too many CSS @media breakpoints ({len(breakpoints)} > 32) in site/ page")
-        if suffix != ".svg":
-            svg_matches = list(re.finditer(r"(?is)<\s*svg\b.*?</\s*svg\s*>", text))
-            open_svgs = len(re.findall(r"(?i)<\s*svg\b", text))
-            close_svgs = len(re.findall(r"(?i)</\s*svg\s*>", text))
-            if open_svgs != close_svgs or len(svg_matches) != open_svgs:
-                _emit("unapproved inline vector graphic in site/")
-            for sm in svg_matches:
-                blk = sm.group(0)
-                svg_sha = hashlib.sha256(re.sub(r"\s+", " ", blk.strip()).encode("utf-8")).hexdigest()
-                if len(re.findall(r"(?i)<\s*svg\b", blk)) != 1 or svg_sha not in APPROVED_SITE_INLINE_SVGS:
-                    _emit("unapproved inline vector graphic in site/")
-            non_svg_html = re.sub(r"(?is)<\s*svg\b.*?</\s*svg\s*>", "", text)
-            if re.search(r"(?i)<\s*(?:svg|path|polygon|polyline|rect|circle|ellipse|line)\b", non_svg_html):
-                _emit("unapproved inline vector graphic in site/")
-        for src, raw_body in parser.script_tags:
-            if src is not None:
-                resolved_src = resolve_site_asset_href(rel, src)
-                expected_sha = APPROVED_SITE_SCRIPT_FILES.get(resolved_src) if resolved_src else None
-                actual_sha = (script_hashes_by_rel or {}).get(resolved_src) if resolved_src else None
-                if resolved_src is None or expected_sha is None or actual_sha != expected_sha:
-                    _emit(f"unapproved executable script src in site/ ({src[:36]})")
-                if raw_body.strip():
-                    _emit("unapproved executable inline script in site/")
-            else:
-                body_sha = hashlib.sha256(raw_body.encode("utf-8")).hexdigest() if raw_body.strip() else ""
-                if body_sha not in APPROVED_SITE_INLINE_SCRIPTS:
-                    _emit("unapproved executable inline script in site/")
 
+    if suffix == ".webmanifest":
+        try:
+            manifest = json.loads(text)
+        except json.JSONDecodeError:
+            _emit("links", "invalid JSON in web manifest")
+            return
+        if isinstance(manifest, dict) and isinstance(manifest.get("icons"), list):
+            for icon in manifest["icons"]:
+                if not isinstance(icon, dict) or not isinstance(icon.get("src"), str):
+                    continue
+                src = icon["src"]
+                resolved = resolve_site_asset_href(rel, src)
+                if resolved is None:
+                    _emit("publish", f"remote or escaping manifest icon src ({src[:36]}) (section 13)")
+                elif not (root / resolved).is_file():
+                    _emit("links", f"broken manifest icon link -> {src}")
+        return
 
-def collect_site_context(root: Path) -> tuple[dict[str, str], dict[str, str], list[dict[str, str]]]:
-    """Collect site/ CSS sources by relpath, script SHA-256 digests, and approved i18n dictionaries."""
-    css_by_rel: dict[str, str] = {}
-    script_hashes_by_rel: dict[str, str] = {}
-    first_map: dict[str, str] = {}
-    last_map: dict[str, str] = {}
-    kv_re = re.compile(
-        r"(?:([a-zA-Z_][a-zA-Z0-9_]*)|\"([^\"]+)\"|'([^']+)')\s*:\s*"
-        r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)')"
-    )
-    for path in iter_files(root):
-        rel = path.relative_to(root).as_posix()
-        if not rel.startswith("site/"):
-            continue
-        suffix = path.suffix.lower()
-        if suffix not in (".css", *SITE_SCRIPT_SUFFIXES):
-            continue
-        raw = path.read_bytes()
-        status, text = _decode_site_text(raw)
-        if suffix == ".css":
-            if status == "text" and text is not None:
-                css_by_rel[rel] = text
-        else:
-            sha = hashlib.sha256(raw).hexdigest()
-            script_hashes_by_rel[rel] = sha
-            if status == "text" and text is not None and sha == APPROVED_SITE_SCRIPT_FILES.get(rel):
-                dec = fold_js_expressions(text)
-                for m in kv_re.finditer(dec):
-                    k = m.group(1) or m.group(2) or m.group(3)
-                    v = m.group(4) if m.group(4) is not None else (m.group(5) or "")
-                    if k not in first_map:
-                        first_map[k] = v
-                    last_map[k] = v
-    i18n_maps = [m for m in (first_map, last_map) if m]
-    return css_by_rel, script_hashes_by_rel, i18n_maps
+    if suffix not in (".html", ".htm", ".xhtml", ".svg", ".xml"):
+        return
+
+    parser = _parse_site_html(text, page_rel=rel)
+    for cat, msg in parser.html_issues:
+        _emit(cat, f"{msg} (section 13)")
+    for css_blk in parser.style_blocks:
+        _check_css_text(css_blk)
+    if suffix not in (".html", ".htm", ".xhtml"):
+        return
+
+    for kind, target in parser.asset_refs:
+        if kind in ("link", "script", "img"):
+            if re.match(r"^(?:data|javascript|vbscript):", target.strip(), re.IGNORECASE):
+                continue
+            resolved = resolve_site_asset_href(rel, target)
+            if resolved is None:
+                _emit("publish", f"remote or escaping {kind} asset in site/ ({target[:36]}) (section 13)")
+            elif not (root / resolved).is_file():
+                _emit("links", f"broken local {kind} link -> {target}")
+        elif kind == "anchor":
+            raw = target.strip()
+            if raw.startswith("#"):
+                frag = raw[1:]
+                if not frag or frag not in parser.element_ids:
+                    _emit("links", f"broken fragment link -> {target}")
+            elif raw == "/" or raw.startswith(("/#", "/?")):
+                if not (root / "site/index.html").is_file():
+                    _emit("links", f"broken relative link -> {target}")
+                elif rel == "site/index.html" and raw.startswith("/#"):
+                    frag = raw[2:]
+                    if not frag or frag not in parser.element_ids:
+                        _emit("links", f"broken fragment link -> {target}")
+            elif raw and not re.match(r"^(?:https?:|mailto:|tel:|javascript:|vbscript:|data:|//)", raw, re.IGNORECASE):
+                resolved = resolve_site_asset_href(rel, raw)
+                if resolved is None:
+                    _emit("links", f"broken relative link -> {target}")
+                else:
+                    target_path = root / resolved
+                    if not (target_path.is_file() or (target_path / "index.html").is_file()):
+                        _emit("links", f"broken relative link -> {target}")
 
 
 def normalized_site_views(
     path: Path,
     text: str,
     page_rel: str = "site/index.html",
-    css_by_rel: dict[str, str] | None = None,
-    i18n_maps: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
 ) -> list[str]:
     """Build raw and decoded/rendered views of a deployed site/ text asset."""
     views: list[str] = []
@@ -2400,17 +953,16 @@ def normalized_site_views(
             views.append(candidate)
 
     _add(text)
-    stripped = INVISIBLE_FORMAT_RE.sub("", text)
-    _add(stripped)
+    _add(INVISIBLE_FORMAT_RE.sub("", text))
     js_dec = INVISIBLE_FORMAT_RE.sub("", fold_js_expressions(text))
     _add(js_dec)
     suffix = path.suffix.lower()
     if suffix in (".css", ".html", ".htm", ".xhtml", ".svg"):
         _add(INVISIBLE_FORMAT_RE.sub("", unescape_css_literals(text)))
     if suffix in (".html", ".htm", ".xhtml", ".svg", ".xml") or "<" in js_dec or "&" in js_dec:
-        _add(normalize_html_text(text, page_rel=page_rel, css_by_rel=css_by_rel, i18n_maps=i18n_maps))
+        _add(normalize_html_text(text, page_rel=page_rel))
         if js_dec != text:
-            _add(normalize_html_text(js_dec, page_rel=page_rel, css_by_rel=css_by_rel, i18n_maps=i18n_maps))
+            _add(normalize_html_text(js_dec, page_rel=page_rel))
     for base_view in list(views):
         cur = base_view
         for _ in range(2):
@@ -2502,9 +1054,6 @@ def _scan_leak_patterns(
 ) -> None:
     for pattern, category, label, predicate in patterns:
         for match in pattern.finditer(text):
-            # A pattern without a predicate describes prose, and a fenced
-            # block is not prose. The style guide shows each of these
-            # shapes as an example of what to avoid.
             if predicate is None and not ctx.prose[match.start():match.end()].strip():
                 continue
             if predicate is not None and not predicate(text, match, ctx):
@@ -2518,12 +1067,14 @@ def _scan_leak_patterns(
 
 
 def check_leaks(root: Path, report: Report) -> None:
+    """Scan published site/ assets and repository source files for leaked identifiers."""
     site_path_patterns = [*LEAK_PATTERNS[:4], *SITE_LEAK_PATTERNS]
-    site_css_by_rel, site_script_hashes, site_i18n_maps = collect_site_context(root)
     for path in iter_files(root):
         rel = path.relative_to(root).as_posix()
         markdown = is_markdown(path)
         if rel.startswith("site/"):
+            if " " in path.name:
+                report.add("naming", f"{rel}: file name contains a space")
             seen_for_file: set[tuple[str, str]] = set()
             site_rel_path = "/" + rel[len("site/"):]
             path_views = [site_rel_path]
@@ -2539,6 +1090,7 @@ def check_leaks(root: Path, report: Report) -> None:
             for pv in path_views:
                 path_ctx = FileContext(url_spans=[], prose=pv, masked=pv)
                 _scan_leak_patterns(rel, pv, site_path_patterns, path_ctx, report, seen_for_file)
+
             status, site_text = read_deployed_site_asset(root, path)
             if status == "unscanned_binary":
                 report.add(
@@ -2546,47 +1098,20 @@ def check_leaks(root: Path, report: Report) -> None:
                     f"{rel}: unscanned binary or encrypted asset in published site/ tree (section 13)",
                 )
                 continue
-            if status == "unapproved_raster":
+            if status == "png_metadata":
                 report.add(
                     "publish",
-                    f"{rel}: unapproved or uninspected raster asset in published site/ tree (section 13)",
-                )
-                if not site_text:
-                    continue
-            elif status == "unapproved_vector":
-                report.add(
-                    "publish",
-                    f"{rel}: unapproved or uninspected vector asset in published site/ tree (section 13)",
-                )
-                if not site_text:
-                    continue
-            elif status == "unapproved_script":
-                report.add(
-                    "publish",
-                    f"{rel}: unapproved or uninspected executable script in published site/ tree (section 13)",
+                    f"{rel}: PNG ancillary text metadata chunk (tEXt/zTXt/iTXt) not allowed in published site/ tree (section 13)",
                 )
                 if not site_text:
                     continue
             elif status != "text" or site_text is None:
                 continue
-            check_site_visual_integrity(
-                rel,
-                path,
-                site_text,
-                report,
-                seen_for_file,
-                css_by_rel=site_css_by_rel,
-                script_hashes_by_rel=site_script_hashes,
-            )
+
+            check_site_links_and_safety(root, rel, path, site_text, report, seen_for_file)
             patterns = list(LEAK_PATTERNS) if markdown else list(LEAK_PATTERNS[:4])
             patterns.extend(SITE_LEAK_PATTERNS)
-            for view in normalized_site_views(
-                path,
-                site_text,
-                page_rel=rel,
-                css_by_rel=site_css_by_rel,
-                i18n_maps=site_i18n_maps,
-            ):
+            for view in normalized_site_views(path, site_text, page_rel=rel):
                 prose = blank_fenced_blocks(view) if markdown else view
                 masked = blank_code_spans(prose) if markdown else view
                 ctx = FileContext(
@@ -2596,6 +1121,7 @@ def check_leaks(root: Path, report: Report) -> None:
                 )
                 _scan_leak_patterns(rel, view, patterns, ctx, report, seen_for_file)
             continue
+
         if markdown:
             text = path.read_text(encoding="utf-8", errors="ignore")
             repo_patterns = [*LEAK_PATTERNS, *IDENTIFIER_LEAK_PATTERNS]
@@ -2611,6 +1137,7 @@ def check_leaks(root: Path, report: Report) -> None:
                 else decoded_txt
             )
             repo_patterns = [*LEAK_PATTERNS[:4], *IDENTIFIER_LEAK_PATTERNS]
+
         seen_repo: set[tuple[str, str]] = set()
         repo_views: list[str] = []
         for base_cand in (text, html.unescape(text), fold_js_expressions(text)):
@@ -2657,15 +1184,11 @@ def matching_internal_note_pattern(rel: str) -> str | None:
 
 
 def check_internal_paths(root: Path, report: Report) -> None:
+    """Verify .gitignore protections and reject tracked internal working notes."""
     gitignore = root / ".gitignore"
     text = gitignore.read_text(encoding="utf-8", errors="ignore") if gitignore.exists() else ""
     missing = [pattern for pattern in INTERNAL_NOTE_GITIGNORE if pattern not in text]
     if missing:
-        # Blocking in both phases. This is the first of the three layers that
-        # keep working notes out of a public repository, and it is the only one
-        # that acts before the note is committed at all. A repository that
-        # loses it stops preventing the mistake and starts detecting it, which
-        # is a different and much later guarantee.
         report.add(
             "hygiene",
             ".gitignore: internal note paths not ignored — " + ", ".join(missing),
@@ -2695,8 +1218,6 @@ def check_internal_paths(root: Path, report: Report) -> None:
                 report.add("hygiene", f"{rel}: tracked internal note matching {matched} (section 6)")
         if is_markdown(path) and re.search(r"(^|/)(out|output)/[^/]+/", rel):
             report.add("content", f"{rel}: committed output directory (section 5)")
-
-
 
 
 def main(argv: list[str] | None = None) -> int:
