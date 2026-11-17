@@ -27,3 +27,5 @@ npm test
 ## 提交信息
 
 一句话说清改动的祈使句，例如 `docs: 补充图标安装说明`。一个 PR 只做一件事，不夹带无关改动。
+
+Documentation follows the [QuantStrategyLab documentation style guide](https://github.com/QuantStrategyLab/.github/blob/main/docs/STYLE_GUIDE.md).
