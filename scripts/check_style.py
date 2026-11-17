@@ -750,7 +750,7 @@ APPROVED_SITE_RASTERS: dict[str, list[tuple[int, int, int, int, int, str]]] = {
 SITE_SCRIPT_SUFFIXES = {".js", ".mjs", ".cjs"}
 APPROVED_SITE_SCRIPT_FILES: dict[str, str] = {
     "site/assets/app.js": "a38c89a342115396fc79960771a77eb63e314dc6874fdcad46529dead36a6408",
-    "site/assets/i18n.js": "0e6946cbdaf887fb790cae6c05992dff0575e99328dd02968374d4a09b35dda5",
+    "site/assets/i18n.js": "4fdd39f086eed30377f5e2ff0c620a78d6f09d5bb63f785121db06c5685ebd9d",
 }
 APPROVED_SITE_INLINE_SCRIPTS: set[str] = {
     "df216a14d05020b1d67c017b9252c0390dcfd70f727e188f42d8b92ac557637f",

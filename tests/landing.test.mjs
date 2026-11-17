@@ -16,6 +16,7 @@ const THEMES = ["light", "dark"];
 const TOKENS = ["bg", "surf", "ink", "ink2", "ink3", "rule", "rule2", "acc", "acc2", "onacc"];
 const ALLOWED_LINKS = new Set([
   "https://github.com/QuantStrategyLab",
+  "https://github.com/orgs/QuantStrategyLab/repositories",
   "https://github.com/QuantStrategyLab/QuantPlatformKit",
   "https://github.com/QuantStrategyLab/UsEquityStrategies",
   "https://github.com/QuantStrategyLab/QuantAdvisorResearch"
@@ -173,6 +174,7 @@ test("all anchors target existing ids or allow-listed public pages", () => {
   assert.ok(hrefs.includes("https://github.com/QuantStrategyLab"));
   assert.ok(hrefs.includes("https://github.com/QuantStrategyLab/QuantAdvisorResearch"));
   assert.ok(hrefs.includes("https://github.com/QuantStrategyLab/QuantPlatformKit"));
+  assert.ok(hrefs.includes("https://github.com/orgs/QuantStrategyLab/repositories"));
   assert.ok(!hrefs.some((href) => /console|login|gateway/i.test(href)), "console/login links must not be published");
   assert.match(html, /<div class="row"><h3 data-i18n="i2"/, "reconciliation ledger must be unlinked text");
   assert.match(html, /<div class="row"><h3 data-i18n="i4"/, "gateway console must be unlinked text");
