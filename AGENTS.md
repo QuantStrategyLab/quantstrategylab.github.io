@@ -35,7 +35,9 @@ QuantStrategyLab 官网。静态站点，没有框架、没有服务端渲染、
 
 ```bash
 npm test
-python3 scripts/test_style.py && python3 scripts/check_style.py --phase 2
+python3 scripts/test_site.py && python3 scripts/check_site.py --phase 2
+# 组织通用文档规则（若同级已检出 .github）：
+python3 ../.github/scripts/check_style.py --root . --phase 2
 ```
 
 `pretest` 会先跑 `build:icons`，所以这条命令同时验证图标能重新生成。改动只涉及文案时可只跑相关用例，并在 PR 里说明未跑的部分。

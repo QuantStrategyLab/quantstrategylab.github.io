@@ -18,3 +18,5 @@ docs/changes/
 docs/acceptance-policy.md
 .claude/
 .codex/
+__pycache__/
+*.py[cod]

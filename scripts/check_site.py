@@ -1,30 +1,8 @@
 #!/usr/bin/env python3
-"""Check a repository against docs/STYLE_GUIDE.md.
-
-The style guide is 500 lines of prose and nothing enforced it. This script turns
-the mechanically checkable parts into exit codes, so a pull request that breaks
-them fails instead of relying on a reviewer remembering section 7.
-
-Checks come from the guide, not from invention:
-
-  section 2   marketing words, filler openings, emoji in headings
-  section 4   language suffixes
-  section 5   content that stays out of public repositories
-  section 6   internal note paths
-  section 7   file naming
-  section 13  the grep list the guide already tells reviewers to run
+"""Check QuantStrategyLab website assets, DOM/CSS integrity, and identifier leaks.
 
 Usage:
-    python scripts/check_style.py [--root PATH] [--phase {1,2}]
-
-Phases exist because 26 repositories already carry violations. Turning all of
-them into blocking failures on day one means every open pull request goes red
-and the check gets deleted. Phase 1 blocks only the defects that leak private
-data or break a reader's navigation; naming and README structure are reported
-but do not fail. Phase 2 blocks everything, and should be switched on once the
-naming cleanup is done.
-
-Exit code 0 when nothing in the blocking set is found.
+    python scripts/check_site.py [--root PATH] [--phase {1,2}] [--advisory] [--visibility {public,private}]
 """
 
 from __future__ import annotations
@@ -52,58 +30,6 @@ SKIP_DIRS = {
     ".gradle", ".mypy_cache", ".pytest_cache", ".ruff_cache", "site-packages",
     ".idea", ".vscode",
 }
-
-# Section 7: these keep their uppercase spelling because tools and readers
-# expect them.
-CONVENTIONAL_UPPER = {
-    "README", "CHANGELOG", "SECURITY", "CONTRIBUTING", "CODE_OF_CONDUCT",
-    "LICENSE", "SUPPORT", "GOVERNANCE", "AUTHORS", "NOTICE", "AGENTS",
-    "CLAUDE", "THIRD_PARTY_NOTICES", "TRADEMARK", "ARCHITECTURE",
-    "CONFIGURATION", "GLOSSARY", "STYLE_GUIDE", "PULL_REQUEST_TEMPLATE",
-    "ISSUE_TEMPLATE", "FUNDING", "SKILL", "INDEX",
-}
-
-DATE_IN_NAME = re.compile(r"(?<!\d)20\d{2}[-_]?\d{2}[-_]?\d{2}(?!\d)")
-
-# The block `tools/sync_agents.py` writes into AGENTS.md. A rule stated only in
-# the guide is read by whoever opens the guide; this one is read by every agent
-# that opens the repository, which is the only point early enough to matter.
-CONTENT_BOUNDARY = "<!-- content-boundary:begin -->"
-
-# A date in the name is a defect when the file describes something that keeps
-# changing, because the date goes stale while the name stays. It is the
-# identity of the record when the file is a snapshot of one date: two analyses
-# of the same subject from different months are different documents, and
-# dropping the date leaves them fighting over one name.
-#
-# Section 7 therefore exempts the two places that hold records. ADRs carry a
-# sequence number rather than a date, but they are the same kind of thing.
-DATE_BEARING_PATHS = ("docs/adr/", "docs/research/")
-
-# Section 3 outline. The guide calls it "a default, not a required template",
-# so a missing section is never blocking.
-README_OUTLINE = [
-    "status", "what this is", "what this is not", "quick start",
-    "configuration", "architecture", "repository layout", "contributing",
-    "security", "license",
-]
-
-# Section 2, "Habits to avoid".
-#
-# `robust` and `powerful` are deliberately absent. Both are technical terms in
-# this corpus — a robust estimator, statistical power — and a rule that flags
-# them reported twelve non-defects in the research docs and one quotation of
-# Hansen's SPA test. A word that is marketing in a landing page and a term of
-# art in a research note cannot be decided by a word list, so the list keeps
-# only the words that have no technical sense here.
-MARKETING_WORDS = [
-    "seamless", "cutting-edge", "comprehensive",
-    "world-class", "next-generation", "state-of-the-art", "best-in-class",
-]
-FILLER_PHRASES = [
-    "it is worth noting", "it's worth noting", "in summary", "let's dive in",
-    "needless to say", "at the end of the day",
-]
 
 # Section 13 says "non-placeholder buckets" and section 7 line 104 says the
 # placeholder form is `<bucket>`, `<project-id>`, `$PROJECTS_ROOT`. So a
@@ -414,284 +340,6 @@ def is_markdown(path: Path) -> bool:
     return path.suffix.lower() in {".md", ".markdown"}
 
 
-def has_emoji(text: str) -> bool:
-    for char in text:
-        if ord(char) < 0x2000:
-            continue
-        if unicodedata.category(char) == "So":
-            return True
-    return False
-
-
-def strip_fenced_blocks(text: str) -> str:
-    """Drop ``` fenced blocks.
-
-    Documentation about documentation contains example links such as
-    `[简体中文](README.zh-CN.md)`. Those are illustrations, not links, and
-    checking them reports failures the author cannot fix.
-    """
-    return re.sub(r"^```.*?^```", "", text, flags=re.DOTALL | re.MULTILINE)
-
-
-# GitHub recognises these two template names with underscores only. Renaming
-# them to hyphens silently disables the template, so they are exempt from the
-# underscore rule while the lowercase rule still applies.
-GITHUB_TEMPLATE_NAMES = {"pull_request_template", "issue_template"}
-
-
-def check_naming(root: Path, report: Report) -> None:
-    for path in iter_files(root):
-        if not is_markdown(path):
-            continue
-        name = path.name
-        rel = path.relative_to(root).as_posix()
-        core = name[:-3]
-
-        if " " in name:
-            report.add("naming", f"{rel}: file name contains a space")
-
-        if core.endswith(".zh-CN"):
-            core = core[: -len(".zh-CN")]
-        elif core.endswith(".zh-cn"):
-            report.add("naming", f"{rel}: language suffix must be .zh-CN.md, not .zh-cn.md")
-            core = core[: -len(".zh-cn")]
-        elif core.endswith(".en"):
-            report.add(
-                "naming",
-                f"{rel}: English is the base name (section 4); .en.md is not a suffix",
-            )
-
-        if rel != "PROPOSAL.md" and core not in CONVENTIONAL_UPPER and core not in GITHUB_TEMPLATE_NAMES:
-            if core != core.lower():
-                report.add("naming", f"{rel}: file name must be lowercase (section 7)")
-            if "_" in core:
-                report.add("naming", f"{rel}: use hyphens, not underscores (section 7)")
-
-        if DATE_IN_NAME.search(core) and not rel.startswith(DATE_BEARING_PATHS):
-            report.add("naming", f"{rel}: dates belong in history, not file names (section 7)")
-
-
-RE_PATCH_PROSE = re.compile(
-    r"\b(this change|this pr|in this pr|this policy pr|remains? unchanged)\b",
-    re.IGNORECASE,
-)
-RE_PHASE_HEADING = re.compile(r"^#{1,4}\s+.*\bP0[–-]P\d+\b", re.MULTILINE)
-RE_LICENSE_HEADING = re.compile(r"^##\s+(?:License|许可证)\s*$")
-RE_H2_HEADING = re.compile(r"^##\s+\S+")
-MAX_AGENTS_LINES = 120
-
-
-def check_readme(root: Path, report: Report) -> None:
-    readme = root / "README.md"
-    if not readme.exists():
-        report.add("readme", "README.md is missing")
-    else:
-        text = readme.read_text(encoding="utf-8", errors="ignore")
-        headings = [h.strip().lower() for h in re.findall(r"^#{2,3}\s+(.+)$", text, re.MULTILINE)]
-        missing = [
-            section for section in README_OUTLINE
-            if not any(section in heading for heading in headings)
-        ]
-        if missing:
-            report.add(
-                "readme",
-                "README.md: section 3 outline not followed — missing "
-                + ", ".join(missing)
-                + " (a default, not a requirement)",
-            )
-
-    for name in ("README.md", "README.zh-CN.md"):
-        path = root / name
-        if not path.exists():
-            continue
-        raw = path.read_text(encoding="utf-8", errors="ignore")
-        prose = blank_fenced_blocks(raw)
-        masked = blank_code_spans(prose)
-        seen_license = False
-        for lineno, (prose_line, masked_line) in enumerate(
-            zip(prose.splitlines(), masked.splitlines()), 1
-        ):
-            match = RE_PATCH_PROSE.search(masked_line)
-            if match:
-                report.add(
-                    "content",
-                    f"{name}:{lineno}: PR-diff narration '{match.group(0)}' belongs in PR description, not README (section 2)",
-                )
-            if RE_PHASE_HEADING.match(prose_line):
-                report.add(
-                    "content",
-                    f"{name}:{lineno}: phase code heading belongs outside reader-facing README (section 5)",
-                )
-            if RE_LICENSE_HEADING.match(prose_line):
-                seen_license = True
-            elif seen_license and RE_H2_HEADING.match(prose_line):
-                report.add(
-                    "content",
-                    f"{name}:{lineno}: top-level section after License belongs above License (section 3)",
-                )
-
-
-def check_links(root: Path, report: Report) -> None:
-    for path in iter_files(root):
-        if not is_markdown(path):
-            continue
-        # A link written inside backticks is an example of how to write a link,
-        # not a link. `pr-attachments.md` documents `![alt](./shot.png)` so the
-        # reader can copy it; reporting that as a broken target makes the
-        # documentation of the feature impossible to pass the check.
-        text = blank_code_spans(
-            strip_fenced_blocks(path.read_text(encoding="utf-8", errors="ignore"))
-        )
-        for match in re.finditer(r"\[[^\]]*\]\(([^)\s]+)\)", text):
-            target = match.group(1)
-            if target.startswith(("http://", "https://", "mailto:", "#", "<")):
-                continue
-            resolved = (path.parent / urllib.parse.unquote(target.split("#")[0])).resolve()
-            # A link that climbs out of the repository points at a sibling
-            # checkout. CI only has this repository, so the target cannot exist
-            # there — that is not a broken link, it is a reference this check
-            # cannot verify. Reporting it as broken makes the check unusable in
-            # CI while passing locally, which is the worst of both.
-            if not resolved.is_relative_to(root):
-                # `xref` is not in PHASE_BLOCKING, so this stays a note in
-                # both phases. `tools/check_cross_repo_links.py` resolves these
-                # against the sibling's default branch on a schedule; a check
-                # that says "not checked" has no standing to block.
-                report.add(
-                    "xref",
-                    f"{path.relative_to(root).as_posix()}: cross-repository reference, not checked -> {target}",
-                )
-                continue
-            if not resolved.exists():
-                report.add(
-                    "links",
-                    f"{path.relative_to(root).as_posix()}: broken relative link -> {target}",
-                )
-
-
-def check_agent_files(root: Path, report: Report) -> None:
-    tracked = subprocess.run(
-        ["git", "ls-files", "--cached", "-z", "--", "AGENTS.md", "CLAUDE.md"],
-        cwd=root, capture_output=True, text=True, check=False,
-    )
-    names = set(tracked.stdout.split("\0")) if tracked.returncode == 0 else set()
-
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        path = root / name
-        if not path.exists():
-            report.add("agents", f"{name} is missing")
-        elif name not in names:
-            report.add("agents", f"{name} is not tracked by Git; a local copy is not a committed rule")
-
-    claude = root / "CLAUDE.md"
-    if claude.exists():
-        content = claude.read_text(encoding="utf-8", errors="ignore").strip()
-        if content != "@AGENTS.md":
-            report.add("agents", "CLAUDE.md must contain the single line @AGENTS.md")
-
-    if (root / ".github" / "engineering.md").exists() and not is_untracked_gitignored(
-        root, ".github/engineering.md"
-    ):
-        report.add(
-            "agents",
-            ".github/engineering.md is retired; consolidate rules in AGENTS.md",
-        )
-
-    agents = root / "AGENTS.md"
-    if agents.exists():
-        text = agents.read_text(encoding="utf-8", errors="ignore")
-        if len(text.splitlines()) > MAX_AGENTS_LINES:
-            report.add(
-                "agents",
-                f"AGENTS.md exceeds {MAX_AGENTS_LINES} lines; keep agent rules concise",
-            )
-        if CONTENT_BOUNDARY not in text:
-            report.add(
-                "agents",
-                "AGENTS.md is missing the content-boundary block, see section 5",
-            )
-
-
-def check_docs_baseline(root: Path, report: Report) -> None:
-    """The file set a reader expects, split by what the repository is.
-
-    A LICENSE is the signal: a repository that grants rights to outside readers
-    owes them a contribution path, a way to report a vulnerability, and a
-    conduct policy. A repository that does not grant them is internal, and an
-    internal repository needs one thing from this list — where credentials live
-    and what to do when one leaks — not a public disclosure process it will
-    never run.
-    """
-    if (root / "LICENSE").exists():
-        required = ["CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md"]
-        kind = "public"
-    else:
-        required = ["SECURITY.md"]
-        kind = "private"
-    missing = [name for name in required if not (root / name).exists()]
-    if missing:
-        report.add(
-            "docs",
-            f"{kind} repository is missing {', '.join(missing)} (section 14)",
-        )
-
-
-QUOTE_MARKS = "\"'\u201c\u201d\u2018\u2019"
-QUOTED_TERM = re.compile(r"[\"\'\u201c\u2018][^\"\'\u201c\u201d\u2018\u2019]{1,40}[\"\'\u201d\u2019]")
-
-
-def quoted_term_list(line: str, match: re.Match) -> bool:
-    """True when a banned word sits inside a list of quoted terms.
-
-    Section 2 forbids marketing words in prose. A guide that writes
-    "Elevate", "Seamless", "Unleash" is naming the words it forbids, and
-    reporting it makes the rule unusable exactly where it is most needed --
-    the same shape as the placeholder-subdomain and template-underscore
-    exemptions.
-
-    The condition is two or more quoted terms on the line, so one quoted word
-    used as a claim ("our 'seamless' onboarding") is still reported. That
-    keeps the exemption about lists, not about quotation marks.
-    """
-    before = line[match.start() - 1] if match.start() else ""
-    after = line[match.end()] if match.end() < len(line) else ""
-    if before not in QUOTE_MARKS or after not in QUOTE_MARKS:
-        return False
-    return len(QUOTED_TERM.findall(line)) >= 2
-
-
-def check_language(root: Path, report: Report) -> None:
-    marketing = re.compile(
-        r"\b(" + "|".join(re.escape(w) for w in MARKETING_WORDS) + r")\b", re.IGNORECASE
-    )
-    filler = re.compile(
-        r"\b(" + "|".join(re.escape(p) for p in FILLER_PHRASES) + r")\b", re.IGNORECASE
-    )
-    for path in iter_files(root):
-        if not is_markdown(path):
-            continue
-        rel = path.relative_to(root).as_posix()
-        # A word inside a fenced block or a code span is being named, not used.
-        # The guide lists the words it forbids, and without this the guide is
-        # the largest offender in the organisation.
-        text = blank_code_spans(blank_fenced_blocks(path.read_text(encoding="utf-8", errors="ignore")))
-        first_heading = True
-        for number, line in enumerate(text.splitlines(), 1):
-            for match in marketing.finditer(line):
-                if quoted_term_list(line, match):
-                    continue
-                report.add("language", f"{rel}:{number}: marketing word '{match.group(0)}' (section 2)")
-            for match in filler.finditer(line):
-                report.add("language", f"{rel}:{number}: filler phrase '{match.group(0)}' (section 2)")
-            if line.startswith("#") and has_emoji(line):
-                report.add("language", f"{rel}:{number}: emoji in heading (section 2)")
-            if line.startswith("#"):
-                # Section 5 is about the title a reader sees in a list of
-                # documents. A dated section inside a research log is a
-                # chronology, not a title.
-                if first_heading and DATED_TITLE.search(line):
-                    report.add("language", f"{rel}:{number}: dated title in a reader-facing doc (section 5)")
-                first_heading = False
 
 
 CODE_SPAN = re.compile(r"`[^`\n]+`")
@@ -2952,14 +2600,14 @@ def check_leaks(root: Path, report: Report) -> None:
             text = path.read_text(encoding="utf-8", errors="ignore")
             repo_patterns = [*LEAK_PATTERNS, *IDENTIFIER_LEAK_PATTERNS]
         else:
-            if rel == "scripts/test_style.py":
+            if rel == "scripts/test_site.py":
                 continue
             tx_status, decoded_txt = _decode_site_text(path.read_bytes())
             if tx_status != "text" or not decoded_txt:
                 continue
             text = (
                 re.sub(r'ipaddress\.ip_network\("[^"]+"\)', 'ipaddress.ip_network("")', decoded_txt)
-                if rel == "scripts/check_style.py"
+                if rel == "scripts/check_site.py"
                 else decoded_txt
             )
             repo_patterns = [*LEAK_PATTERNS[:4], *IDENTIFIER_LEAK_PATTERNS]
@@ -3049,16 +2697,18 @@ def check_internal_paths(root: Path, report: Report) -> None:
             report.add("content", f"{rel}: committed output directory (section 5)")
 
 
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", help="repository root (default: cwd)")
     parser.add_argument(
         "--phase", type=int, choices=(1, 2), default=1,
-        help="1 blocks leaks and broken links; 2 also blocks naming (default: 1)",
+        help="1 blocks leaks and hygiene; 2 also blocks content issues (default: 1)",
     )
     parser.add_argument(
         "--advisory", action="store_true",
-        help="report findings but always exit 0, for adopting a repository gradually",
+        help="report findings but always exit 0",
     )
     parser.add_argument(
         "--visibility", choices=("public", "private"), default="public",
@@ -3072,12 +2722,6 @@ def main(argv: list[str] | None = None) -> int:
         blocking_categories -= PUBLICATION_CATEGORIES
     report = Report(blocking_categories)
 
-    check_naming(root, report)
-    check_readme(root, report)
-    check_links(root, report)
-    check_agent_files(root, report)
-    check_language(root, report)
-    check_docs_baseline(root, report)
     check_leaks(root, report)
     check_internal_paths(root, report)
 
@@ -3100,10 +2744,6 @@ def main(argv: list[str] | None = None) -> int:
             "they would block if this repository were published"
         )
     if args.advisory:
-        # A repository adopts the rule set before it can satisfy it. Failing on
-        # the adoption pull request would make that pull request the first thing
-        # the check blocks, and the check would be removed instead of the
-        # findings fixed. The findings are still printed and still counted.
         print("advisory run: exit status forced to 0")
         return 0
 
