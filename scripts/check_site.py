@@ -309,6 +309,15 @@ PNG_VALID_BIT_DEPTHS = {
     4: {8, 16},
     6: {8, 16},
 }
+_ADAM7_PASSES = (
+    (0, 8, 0, 8),
+    (4, 8, 0, 8),
+    (0, 4, 4, 8),
+    (2, 4, 0, 4),
+    (0, 2, 2, 4),
+    (1, 2, 0, 2),
+    (0, 1, 1, 2),
+)
 
 ALLOWED_SITE_TEXT_SUFFIXES: set[str] = {
     ".html", ".htm", ".xhtml", ".css", ".js", ".mjs", ".cjs", ".svg", ".xml",
@@ -384,6 +393,26 @@ def _decode_png_text_chunk(ctype: bytes, cdata: bytes) -> list[str] | None:
         return None
 
 
+def _valid_png_scanlines(
+    decomp: bytes, width: int, height: int, bit_depth: int, color_type: int, interlace: int
+) -> bool:
+    """Verify PNG decompressed scanline lengths and filter-type bytes for non-interlaced and Adam7 PNGs."""
+    bits_per_pixel = PNG_CHANNELS[color_type] * bit_depth
+    passes = _ADAM7_PASSES if interlace == 1 else ((0, 1, 0, 1),)
+    offset = 0
+    for xs, xstep, ys, ystep in passes:
+        if width <= xs or height <= ys:
+            continue
+        pass_w = (width - xs + xstep - 1) // xstep
+        pass_h = (height - ys + ystep - 1) // ystep
+        stride = (pass_w * bits_per_pixel + 7) // 8
+        for _ in range(pass_h):
+            if offset + 1 + stride > len(decomp) or decomp[offset] > 4:
+                return False
+            offset += 1 + stride
+    return offset == len(decomp)
+
+
 def inspect_png_asset(raw: bytes) -> tuple[str, bool] | None:
     """Validate PNG magic, chunk CRCs, IHDR, IDAT zlib stream, IEND, and ancillary text chunks.
 
@@ -451,10 +480,7 @@ def inspect_png_asset(raw: bytes) -> tuple[str, bool] | None:
     if decomp is None:
         return None
     width, height, bit_depth, color_type, interlace = ihdr
-    row_bytes = (width * PNG_CHANNELS[color_type] * bit_depth + 7) // 8
-    if interlace == 0 and len(decomp) != (row_bytes + 1) * height:
-        return None
-    if interlace == 1 and not decomp:
+    if not _valid_png_scanlines(decomp, width, height, bit_depth, color_type, interlace):
         return None
     return "\n".join(parts), has_text_meta
 
@@ -736,6 +762,9 @@ class _SiteHTMLParser(HTMLParser):
             self.attr_lines.append(f"{k}={v}")
             if "%" in v:
                 self.attr_lines.append(f"{k}={urllib.parse.unquote(v)}")
+            if kl == "style":
+                self.style_blocks.append(v)
+                self.subtrees.append(unescape_css_literals(v))
             if kl == "srcdoc" and self.depth < 3:
                 self.subtrees.append(normalize_html_text(v, self.depth + 1, page_rel=self.page_rel))
         if ad.get("id"):
@@ -776,7 +805,7 @@ class _SiteHTMLParser(HTMLParser):
             if ("<" in dec or "&" in dec) and self.depth < 3:
                 self.subtrees.append(normalize_html_text(dec, self.depth + 1, page_rel=self.page_rel))
         elif tag_name == "style":
-            self.style_blocks.append(unescape_css_literals(raw_body))
+            self.style_blocks.append(raw_body)
             self.subtrees.append(unescape_css_literals(raw_body))
         elif tag_name == "title":
             unesc = html.unescape(raw_body)
@@ -921,14 +950,14 @@ def check_site_links_and_safety(
             raw = target.strip()
             if raw.startswith("#"):
                 frag = raw[1:]
-                if not frag or frag not in parser.element_ids:
+                if frag and frag not in parser.element_ids:
                     _emit("links", f"broken fragment link -> {target}")
             elif raw == "/" or raw.startswith(("/#", "/?")):
                 if not (root / "site/index.html").is_file():
                     _emit("links", f"broken relative link -> {target}")
                 elif rel == "site/index.html" and raw.startswith("/#"):
                     frag = raw[2:]
-                    if not frag or frag not in parser.element_ids:
+                    if frag and frag not in parser.element_ids:
                         _emit("links", f"broken fragment link -> {target}")
             elif raw and not re.match(r"^(?:https?:|mailto:|tel:|javascript:|vbscript:|data:|//)", raw, re.IGNORECASE):
                 resolved = resolve_site_asset_href(rel, raw)

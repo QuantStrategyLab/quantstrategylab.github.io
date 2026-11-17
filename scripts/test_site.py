@@ -350,6 +350,25 @@ class LeakTest(CheckerTestCase):
         (self.root / "site/ico-with-meta.ico").write_bytes(
             _make_ico(_make_png(_png_chunk(b"tEXt", b"Author\x00/home/operator/secret")))
         )
+        ihdr_interlaced = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 1)
+        (self.root / "site/interlaced-valid.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", ihdr_interlaced)
+            + _png_chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+            + _png_chunk(b"IEND", b"")
+        )
+        (self.root / "site/interlaced-smuggled.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", ihdr_interlaced)
+            + _png_chunk(b"IDAT", zlib.compress(b"/home/operator/prod/config"))
+            + _png_chunk(b"IEND", b"")
+        )
+        (self.root / "site/interlaced-bad-filter.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", ihdr_interlaced)
+            + _png_chunk(b"IDAT", zlib.compress(b"\x09\xff\x00\x00"))
+            + _png_chunk(b"IEND", b"")
+        )
 
         report = self.report()
         check_site.check_leaks(self.root, report)
@@ -357,6 +376,9 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("site/tampered-idat.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/nonempty-iend.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/corrupt.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertFalse(any("site/interlaced-valid.png" in m for m in msgs), msgs)
+        self.assertTrue(any("site/interlaced-smuggled.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
+        self.assertTrue(any("site/interlaced-bad-filter.png" in m and "unscanned binary or encrypted asset" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "absolute home path" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "private IPv4 address" in m for m in msgs))
         self.assertTrue(any("site/leak-meta.png" in m and "personal subdomain" in m for m in msgs))
@@ -401,6 +423,28 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("/missing-icon.png" in m for m in links), links)
         self.assertTrue(any("CSS @import external stylesheet" in m for m in publish), publish)
         self.assertTrue(any("site/bad name.txt" in m and "space" in m for m in naming), naming)
+
+    def test_inline_style_urls_and_empty_fragments(self):
+        self.write(
+            "site/index.html",
+            '<div style="border-bottom:0"><a href="#">Back to top</a><a href="/#">Home</a></div>\n',
+        )
+        clean = self.report()
+        check_site.check_leaks(self.root, clean)
+        self.assertEqual(clean.findings, [])
+
+        self.write(
+            "site/inline-style-leak.html",
+            '<div style="background-image:url(https://db-primary&#92;2e ops&#92;2e internal/x.png)">x</div>\n'
+            '<a href="#missing-id">jump</a>\n',
+        )
+        dirty = self.report()
+        check_site.check_leaks(self.root, dirty)
+        publish = self.messages(dirty, "publish")
+        links = self.messages(dirty, "links")
+        self.assertTrue(any("remote or inline-scheme CSS url() resource" in m for m in publish), publish)
+        self.assertTrue(any("internal hostname" in m for m in publish), publish)
+        self.assertTrue(any("broken fragment link -> #missing-id" in m for m in links), links)
 
     def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
         self.write(
