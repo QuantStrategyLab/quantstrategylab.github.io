@@ -444,6 +444,8 @@ class LeakTest(CheckerTestCase):
         self.write(
             "site/index.html",
             '<div id="产品" style="border-bottom:0">'
+            '<a name="details"></a>'
+            '<a href="#details">Details</a>'
             '<a href="#">Back to top</a>'
             '<a href="/#">Home</a>'
             '<a href="?lang=en">English</a>'
@@ -461,12 +463,19 @@ class LeakTest(CheckerTestCase):
             '<a href="#missing-id">jump</a>\n'
             '<a href="?lang=en#missing-id">query-missing</a>\n',
         )
+        self.write(
+            "site/base-hijack.html",
+            '<base href="https://cdn.example.com/">\n'
+            '<script src="assets/app.js"></script>\n',
+        )
+        self.write("site/assets/app.js", "console.log('ok');\n")
         dirty = self.report()
         check_site.check_leaks(self.root, dirty)
         publish = self.messages(dirty, "publish")
         links = self.messages(dirty, "links")
         self.assertTrue(any("remote or inline-scheme CSS url() resource" in m for m in publish), publish)
         self.assertTrue(any("internal hostname" in m for m in publish), publish)
+        self.assertTrue(any("site/base-hijack.html" in m and "HTML base href element in site/" in m for m in publish), publish)
         self.assertTrue(any("broken fragment link -> #missing-id" in m for m in links), links)
         self.assertTrue(any("broken fragment link -> ?lang=en#missing-id" in m for m in links), links)
 

@@ -796,6 +796,8 @@ class _SiteHTMLParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         t = tag.lower()
+        if t == "base":
+            self.html_issues.append(("publish", "HTML base href element in site/"))
         if t in HTML_BLOCK_TAGS:
             self.inline_parts.append("\n")
         ad: dict[str, str] = {}
@@ -826,6 +828,8 @@ class _SiteHTMLParser(HTMLParser):
                 self.subtrees.append(normalize_html_text(v, self.depth + 1, page_rel=self.page_rel))
         if ad.get("id"):
             self.element_ids.add(ad["id"])
+        if t == "a" and ad.get("name"):
+            self.element_ids.add(ad["name"])
         if t == "link" and "href" in ad:
             rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
             if rel_tokens & {"stylesheet", "icon", "apple-touch-icon", "manifest"}:
