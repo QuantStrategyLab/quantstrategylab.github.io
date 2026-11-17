@@ -112,6 +112,8 @@
       pub: "Public",
       restr: "Members only",
       no_public_link: "No public link is available.",
+      i_directory: "Public repository directory",
+      i_directory_desc: "Browse the strategy, data and platform projects on GitHub.",
 
       f_disc:
         "QuantStrategyLab publishes research and engineering work. Nothing on this site is investment advice, an offer, or a solicitation, and we do not publish performance figures. Strategies described here may be in research, paper trading or retired.",
@@ -217,6 +219,8 @@
       pub: "公开",
       restr: "仅限成员",
       no_public_link: "暂无公开链接。",
+      i_directory: "公开仓库目录",
+      i_directory_desc: "在 GitHub 浏览策略、数据和平台项目。",
 
       f_disc:
         "QuantStrategyLab 发布研究与工程成果。本站内容不构成投资建议、要约或招揽，我们也不公布业绩数据。文中描述的策略可能处于研究、模拟交易或已停用状态。",
