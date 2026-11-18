@@ -33,7 +33,7 @@ jobs:
       - name: Verify site asset and leak checks before publishing
         run: python3 scripts/test_site.py && python3 scripts/check_site.py --phase 2
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
       - id: deployment
