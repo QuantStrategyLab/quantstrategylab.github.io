@@ -16,7 +16,13 @@
   "r2_paths": [
     "scripts/",
     ".github/governance/",
-    ".github/scripts/"
+    ".github/scripts/",
+    "site/**/*.js",
+    "site/**/*.mjs",
+    "site/**/*.cjs",
+    "site/**/*.css",
+    "site/**/*.png",
+    "site/**/*.ico"
   ],
   "dependabot_template_exemption": true,
   "max_evidence_age_hours": 168
