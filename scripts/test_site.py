@@ -506,6 +506,7 @@ class LeakTest(CheckerTestCase):
             '<a href="index.html#top">Index Top</a>'
             '<a href="sms:+15555550100">SMS</a>'
             '<a href="geo:37.786971,-122.399677">Map</a>'
+            '<iframe srcdoc="&lt;p id=inner&gt;x&lt;/p&gt;&lt;a href=#inner&gt;go&lt;/a&gt;"></iframe>'
             '<img srcset="ok.png?variant=a,b 1x">\n',
         )
         (self.root / "site/ok.png").write_bytes(_make_png())

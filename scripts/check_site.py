@@ -824,6 +824,7 @@ class _SiteHTMLParser(HTMLParser):
         self.subtrees: list[str] = []
         self.style_blocks: list[str] = []
         self.asset_refs: list[tuple[str, str]] = []
+        self.nested_parsers: list[_SiteHTMLParser] = []
         self.element_ids: set[str] = set()
         self.html_issues: list[tuple[str, str]] = []
         self._raw_tag: str | None = None
@@ -872,7 +873,7 @@ class _SiteHTMLParser(HTMLParser):
                     nested = _parse_site_html(v, depth=self.depth + 1, page_rel=self.page_rel)
                     self.html_issues.extend(nested.html_issues)
                     self.style_blocks.extend(nested.style_blocks)
-                    self.asset_refs.extend(nested.asset_refs)
+                    self.nested_parsers.append(nested)
                     self.subtrees.append(normalize_html_text(v, self.depth + 1, page_rel=self.page_rel))
                 else:
                     self.html_issues.append(("publish", "deeply nested iframe srcdoc in site/"))
@@ -1099,52 +1100,58 @@ def check_site_links_and_safety(
     for css_blk in parser.style_blocks:
         _check_css_text(css_blk, allow_hiding=False)
 
-    def _is_valid_fragment(frag: str) -> bool:
-        return not frag or frag.lower() == "top" or frag in parser.element_ids
-
     resource_kinds = {
         "link", "script", "img", "iframe", "object", "embed",
         "audio", "video", "input", "track", "meta",
     }
-    for kind, target in parser.asset_refs:
-        if kind in resource_kinds:
-            if re.match(r"^(?:data|javascript|vbscript):", target.strip(), re.IGNORECASE):
-                continue
-            resolved = resolve_site_asset_href(rel, target)
-            if resolved is None:
-                _emit("publish", f"remote or escaping {kind} asset in site/ ({target[:36]}) (section 13)")
-            elif not (root / resolved).is_file():
-                _emit("links", f"broken local {kind} link -> {target}")
-        elif kind == "anchor" and suffix in (".html", ".htm", ".xhtml"):
-            raw = target.strip()
-            if not raw:
-                continue
-            unq_raw = urllib.parse.unquote(raw)
-            if re.match(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)", raw) or re.match(
-                r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)", unq_raw
-            ):
-                continue
-            if raw.startswith("#"):
-                frag = urllib.parse.unquote(raw[1:])
-                if not _is_valid_fragment(frag):
-                    _emit("links", f"broken fragment link -> {target}")
-            elif raw.startswith("?"):
-                if "#" in raw:
-                    frag = urllib.parse.unquote(raw.split("#", 1)[1])
+
+    def _validate_parsed_refs(parsed: _SiteHTMLParser) -> None:
+        def _is_valid_fragment(frag: str) -> bool:
+            return not frag or frag.lower() == "top" or frag in parsed.element_ids
+
+        for kind, target in parsed.asset_refs:
+            if kind in resource_kinds:
+                if re.match(r"^(?:data|javascript|vbscript):", target.strip(), re.IGNORECASE):
+                    continue
+                resolved = resolve_site_asset_href(rel, target)
+                if resolved is None:
+                    _emit("publish", f"remote or escaping {kind} asset in site/ ({target[:36]}) (section 13)")
+                elif not (root / resolved).is_file():
+                    _emit("links", f"broken local {kind} link -> {target}")
+            elif kind == "anchor" and suffix in (".html", ".htm", ".xhtml"):
+                raw = target.strip()
+                if not raw:
+                    continue
+                unq_raw = urllib.parse.unquote(raw)
+                if re.match(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)", raw) or re.match(
+                    r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)", unq_raw
+                ):
+                    continue
+                if raw.startswith("#"):
+                    frag = urllib.parse.unquote(raw[1:])
                     if not _is_valid_fragment(frag):
                         _emit("links", f"broken fragment link -> {target}")
-            else:
-                resolved = resolve_site_asset_href(rel, raw, allow_root=True)
-                if resolved is None:
-                    _emit("links", f"broken relative link -> {target}")
-                else:
-                    target_path = root / resolved
-                    if not (target_path.is_file() or (target_path / "index.html").is_file()):
-                        _emit("links", f"broken relative link -> {target}")
-                    elif (resolved == rel or (resolved == "site" and rel == "site/index.html")) and "#" in raw:
+                elif raw.startswith("?"):
+                    if "#" in raw:
                         frag = urllib.parse.unquote(raw.split("#", 1)[1])
                         if not _is_valid_fragment(frag):
                             _emit("links", f"broken fragment link -> {target}")
+                else:
+                    resolved = resolve_site_asset_href(rel, raw, allow_root=True)
+                    if resolved is None:
+                        _emit("links", f"broken relative link -> {target}")
+                    else:
+                        target_path = root / resolved
+                        if not (target_path.is_file() or (target_path / "index.html").is_file()):
+                            _emit("links", f"broken relative link -> {target}")
+                        elif (resolved == rel or (resolved == "site" and rel == "site/index.html")) and "#" in raw:
+                            frag = urllib.parse.unquote(raw.split("#", 1)[1])
+                            if not _is_valid_fragment(frag):
+                                _emit("links", f"broken fragment link -> {target}")
+        for nested in parsed.nested_parsers:
+            _validate_parsed_refs(nested)
+
+    _validate_parsed_refs(parser)
 
 
 def normalized_site_views(
