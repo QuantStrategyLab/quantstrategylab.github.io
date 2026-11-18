@@ -438,8 +438,9 @@ class LeakTest(CheckerTestCase):
     def test_inline_style_urls_and_empty_fragments(self):
         self.write("site/product-details.html", '<h1 id="产品">Details</h1>\n')
         self.write(
-            "site/nested/guide.html",
-            '<a href="?lang=en">English</a><a href="../product%2Ddetails.html#%E4%BA%A7%E5%93%81">Details</a>\n',
+            "site/nested/index.html",
+            '<a href="../">Root</a><a href="?lang=en">English</a>'
+            '<a href="../product%2Ddetails.html#%E4%BA%A7%E5%93%81">Details</a>\n',
         )
         self.write(
             "site/index.html",
@@ -447,6 +448,7 @@ class LeakTest(CheckerTestCase):
             '<a name="details"></a>'
             '<a href="#details">Details</a>'
             '<a href="#">Back to top</a>'
+            '<a href="./">Self</a>'
             '<a href="/#">Home</a>'
             '<a href="?lang=en">English</a>'
             '<a href="#%E4%BA%A7%E5%93%81">产品</a>'
@@ -461,7 +463,13 @@ class LeakTest(CheckerTestCase):
             "site/inline-style-leak.html",
             '<div style="background-image:url(https://db-primary&#92;2e ops&#92;2e internal/x.png)">x</div>\n'
             '<a href="#missing-id">jump</a>\n'
-            '<a href="?lang=en#missing-id">query-missing</a>\n',
+            '<a href="?lang=en#missing-id">query-missing</a>\n'
+            '<a href="../outside.html">escape</a>\n',
+        )
+        self.write(
+            "site/picture-remote.html",
+            '<picture><source srcset="https://cdn.example.com/hero.webp">'
+            '<img src="landing-light-192.png"></picture>\n',
         )
         self.write(
             "site/base-hijack.html",
@@ -469,15 +477,18 @@ class LeakTest(CheckerTestCase):
             '<script src="assets/app.js"></script>\n',
         )
         self.write("site/assets/app.js", "console.log('ok');\n")
+        (self.root / "site/landing-light-192.png").write_bytes(_make_png())
         dirty = self.report()
         check_site.check_leaks(self.root, dirty)
         publish = self.messages(dirty, "publish")
         links = self.messages(dirty, "links")
         self.assertTrue(any("remote or inline-scheme CSS url() resource" in m for m in publish), publish)
         self.assertTrue(any("internal hostname" in m for m in publish), publish)
+        self.assertTrue(any("site/picture-remote.html" in m and "remote or escaping img asset" in m for m in publish), publish)
         self.assertTrue(any("site/base-hijack.html" in m and "HTML base href element in site/" in m for m in publish), publish)
         self.assertTrue(any("broken fragment link -> #missing-id" in m for m in links), links)
         self.assertTrue(any("broken fragment link -> ?lang=en#missing-id" in m for m in links), links)
+        self.assertTrue(any("broken relative link -> ../outside.html" in m for m in links), links)
 
     def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
         self.write(

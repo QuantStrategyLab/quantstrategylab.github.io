@@ -325,7 +325,7 @@ ALLOWED_SITE_TEXT_SUFFIXES: set[str] = {
 }
 
 
-def resolve_site_asset_href(page_rel: str, href: str) -> str | None:
+def resolve_site_asset_href(page_rel: str, href: str, allow_root: bool = False) -> str | None:
     """Resolve a site/-local HTML/CSS href against page_rel; return None for external or escaping targets."""
     raw = href.strip()
     if not raw or raw.startswith("//") or "\\" in raw:
@@ -343,7 +343,9 @@ def resolve_site_asset_href(page_rel: str, href: str) -> str | None:
         base_dir = posixpath.dirname(sub_page)
         joined = posixpath.join(base_dir, clean) if base_dir else clean
         rel_in_site = posixpath.normpath(joined)
-    if rel_in_site in ("", ".", "..") or rel_in_site.startswith("../"):
+    if rel_in_site == ".":
+        return "site" if allow_root else None
+    if rel_in_site in ("", "..") or rel_in_site.startswith("../"):
         return None
     return "site/" + rel_in_site
 
@@ -836,10 +838,10 @@ class _SiteHTMLParser(HTMLParser):
                 self.asset_refs.append(("link", ad["href"]))
         elif t == "script" and "src" in ad:
             self.asset_refs.append(("script", ad["src"]))
-        elif t == "img":
+        elif t in ("img", "source"):
             if "src" in ad:
                 self.asset_refs.append(("img", ad["src"]))
-            if "srcset" in ad:
+            if "srcset" in ad and not re.match(r"^(?:data|javascript|vbscript):", ad["srcset"].strip(), re.IGNORECASE):
                 for cand in ad["srcset"].split(","):
                     parts = cand.strip().split()
                     self.asset_refs.append(("img", parts[0] if parts else ""))
@@ -1025,21 +1027,18 @@ def check_site_links_and_safety(
                     frag = urllib.parse.unquote(raw.split("#", 1)[1])
                     if frag and frag not in parser.element_ids:
                         _emit("links", f"broken fragment link -> {target}")
-            elif raw == "/" or raw.startswith(("/#", "/?")):
-                if not (root / "site/index.html").is_file():
-                    _emit("links", f"broken relative link -> {target}")
-                elif rel == "site/index.html" and "#" in raw:
-                    frag = urllib.parse.unquote(raw.split("#", 1)[1])
-                    if frag and frag not in parser.element_ids:
-                        _emit("links", f"broken fragment link -> {target}")
             else:
-                resolved = resolve_site_asset_href(rel, raw)
+                resolved = resolve_site_asset_href(rel, raw, allow_root=True)
                 if resolved is None:
                     _emit("links", f"broken relative link -> {target}")
                 else:
                     target_path = root / resolved
                     if not (target_path.is_file() or (target_path / "index.html").is_file()):
                         _emit("links", f"broken relative link -> {target}")
+                    elif resolved == "site" and rel == "site/index.html" and "#" in raw:
+                        frag = urllib.parse.unquote(raw.split("#", 1)[1])
+                        if frag and frag not in parser.element_ids:
+                            _emit("links", f"broken fragment link -> {target}")
 
 
 def normalized_site_views(
