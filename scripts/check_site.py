@@ -1108,7 +1108,8 @@ def check_site_links_and_safety(
 
     def _validate_parsed_refs(parsed: _SiteHTMLParser) -> None:
         def _is_valid_fragment(frag: str) -> bool:
-            return not frag or frag.lower() == "top" or frag in parsed.element_ids
+            base_frag = frag.split(":~:", 1)[0]
+            return not base_frag or base_frag.lower() == "top" or base_frag in parsed.element_ids
 
         for kind, target in parsed.asset_refs:
             if kind in resource_kinds:
