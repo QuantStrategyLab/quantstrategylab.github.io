@@ -353,7 +353,7 @@ def _parse_srcset_urls(srcset: str) -> list[str]:
 
 def resolve_site_asset_href(page_rel: str, href: str, allow_root: bool = False) -> str | None:
     """Resolve a site/-local HTML/CSS href against page_rel; return None for external or escaping targets."""
-    raw = href.strip()
+    raw = re.sub(r"[\t\n\r]+", "", href).strip()
     if not raw or raw.startswith("//") or "\\" in raw:
         return None
     clean = raw.split("#", 1)[0].split("?", 1)[0].strip()
@@ -1121,7 +1121,7 @@ def check_site_links_and_safety(
                 elif not (root / resolved).is_file():
                     _emit("links", f"broken local {kind} link -> {target}")
             elif kind == "anchor" and suffix in (".html", ".htm", ".xhtml"):
-                raw = target.strip()
+                raw = re.sub(r"[\t\n\r]+", "", target).strip()
                 if not raw:
                     continue
                 unq_raw = urllib.parse.unquote(raw)

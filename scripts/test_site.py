@@ -507,6 +507,8 @@ class LeakTest(CheckerTestCase):
             '<p id="details">Product details</p>'
             '<a href="#details:~:text=Product">Text Fragment</a>'
             '<a href="#:~:text=Product">Directive Only</a>'
+            '<a href="#det\tails">Tab Fragment</a>'
+            '<a href="in\ndex.html">Newline Path</a>'
             '<a href="sms:+15555550100">SMS</a>'
             '<a href="geo:37.786971,-122.399677">Map</a>'
             '<iframe srcdoc="&lt;p id=inner&gt;x&lt;/p&gt;&lt;a href=#inner&gt;go&lt;/a&gt;"></iframe>'
