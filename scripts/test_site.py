@@ -572,6 +572,7 @@ class LeakTest(CheckerTestCase):
         self.write(
             "site/ns-and-xmlbase.svg",
             '<s:svg xmlns:s="http://www.w3.org/2000/svg" xml:base="https://cdn.example.com/">'
+            '<style>rect { fill: u&#114;l(https://cdn.example.com/charref.svg#p); }</style>'
             '<s:script href="https://cdn.example.com/x.js"></s:script></s:svg>\n',
         )
         dirty = self.report()
@@ -621,6 +622,10 @@ class LeakTest(CheckerTestCase):
         )
         self.assertTrue(
             any("site/ns-and-xmlbase.svg" in m and "remote or escaping script asset" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/ns-and-xmlbase.svg" in m and "https://cdn.example.com/charref.svg#" in m for m in publish),
             publish,
         )
         self.assertTrue(

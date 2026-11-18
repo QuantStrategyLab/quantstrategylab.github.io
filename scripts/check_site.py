@@ -954,8 +954,9 @@ class _SiteHTMLParser(HTMLParser):
             if ("<" in dec or "&" in dec) and self.depth < 3:
                 self.subtrees.append(normalize_html_text(dec, self.depth + 1, page_rel=self.page_rel))
         elif tag_name == "style":
-            self.style_blocks.append(raw_body)
-            self.subtrees.append(unescape_css_literals(raw_body))
+            style_body = html.unescape(raw_body) if self.page_rel.lower().endswith((".svg", ".xml")) else raw_body
+            self.style_blocks.append(style_body)
+            self.subtrees.append(unescape_css_literals(style_body))
         elif tag_name == "title":
             unesc = html.unescape(raw_body)
             self.inline_parts.append(unesc)
