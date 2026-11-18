@@ -901,7 +901,7 @@ class _SiteHTMLParser(HTMLParser):
             if "srcset" in ad and not re.match(r"^(?:data|javascript|vbscript):", ad["srcset"].strip(), re.IGNORECASE):
                 for cand_url in _parse_srcset_urls(ad["srcset"]):
                     self.asset_refs.append(("img", cand_url))
-        elif t in ("iframe", "embed", "audio", "video", "input", "track"):
+        elif t in ("iframe", "frame", "embed", "audio", "video", "input", "track"):
             if "src" in ad:
                 self.asset_refs.append((t, ad["src"]))
             if t == "video" and "poster" in ad:
@@ -1102,7 +1102,7 @@ def check_site_links_and_safety(
         _check_css_text(css_blk, allow_hiding=False)
 
     resource_kinds = {
-        "link", "script", "img", "iframe", "object", "embed",
+        "link", "script", "img", "iframe", "frame", "object", "embed",
         "audio", "video", "input", "track", "meta",
     }
 

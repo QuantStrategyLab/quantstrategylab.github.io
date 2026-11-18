@@ -528,6 +528,7 @@ class LeakTest(CheckerTestCase):
         self.write(
             "site/autoload-remote.html",
             '<iframe src="https://cdn.example.com/frame.html"></iframe>\n'
+            '<frameset><frame src="https://collector.invalid/remote"></frameset>\n'
             '<object data="https://cdn.example.com/obj.swf"></object>\n'
             '<embed src="https://cdn.example.com/emb.swf">\n'
             '<audio src="https://cdn.example.com/a.mp3"></audio>\n'
@@ -584,7 +585,7 @@ class LeakTest(CheckerTestCase):
         check_site.check_leaks(self.root, dirty)
         publish = self.messages(dirty, "publish")
         links = self.messages(dirty, "links")
-        for kind in ("iframe", "object", "embed", "audio", "video", "link", "meta", "script", "img"):
+        for kind in ("iframe", "frame", "object", "embed", "audio", "video", "link", "meta", "script", "img"):
             self.assertTrue(
                 any(f"remote or escaping {kind} asset" in m for m in publish),
                 (kind, publish),
