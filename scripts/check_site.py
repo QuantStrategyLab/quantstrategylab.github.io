@@ -325,6 +325,32 @@ ALLOWED_SITE_TEXT_SUFFIXES: set[str] = {
 }
 
 
+def _parse_srcset_urls(srcset: str) -> list[str]:
+    """Extract candidate URLs from an HTML srcset attribute per spec."""
+    urls: list[str] = []
+    i, n = 0, len(srcset)
+    while i < n:
+        while i < n and srcset[i] in " \t\n\r\f,":
+            i += 1
+        if i >= n:
+            break
+        start = i
+        while i < n and srcset[i] not in " \t\n\r\f":
+            i += 1
+        url = srcset[start:i]
+        if url.endswith(","):
+            urls.append(url.rstrip(","))
+            continue
+        urls.append(url)
+        while i < n and srcset[i] in " \t\n\r\f":
+            i += 1
+        while i < n and srcset[i] != ",":
+            i += 1
+        if i < n and srcset[i] == ",":
+            i += 1
+    return urls
+
+
 def resolve_site_asset_href(page_rel: str, href: str, allow_root: bool = False) -> str | None:
     """Resolve a site/-local HTML/CSS href against page_rel; return None for external or escaping targets."""
     raw = href.strip()
@@ -719,14 +745,21 @@ def unescape_js_literals(text: str) -> str:
 
 
 def unescape_css_literals(text: str) -> str:
-    """Decode CSS hex codepoint escapes for identifier scanning."""
+    """Decode CSS hex and simple escapes for identifier scanning."""
     def _repl(match: re.Match) -> str:
         cp = int(match.group(1), 16)
         if 0 < cp <= 0x10FFFF and not (0xD800 <= cp <= 0xDFFF):
             return chr(cp)
         return match.group(0)
 
-    return CSS_ESCAPE_RE.sub(_repl, LINE_CONTINUATION_RE.sub("", text))
+    decoded = CSS_ESCAPE_RE.sub(_repl, LINE_CONTINUATION_RE.sub("", text))
+    decoded = re.sub(r"\\([^\n\r\f0-9a-fA-F])", r"\1", decoded)
+    while True:
+        folded = re.sub(r'"([^"\n]*)"\s+"([^"\n]*)"', r'"\1\2"', decoded)
+        folded = re.sub(r"'([^'\n]*)'\s+'([^'\n]*)'", r"'\1\2'", folded)
+        if folded == decoded:
+            return folded
+        decoded = folded
 
 
 def fold_js_expressions(text: str) -> str:
@@ -797,7 +830,7 @@ class _SiteHTMLParser(HTMLParser):
         self._raw_chunks: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        t = tag.lower()
+        t = tag.lower().rsplit(":", 1)[-1]
         if t == "base":
             self.html_issues.append(("publish", "HTML base href element in site/"))
         if t in HTML_BLOCK_TAGS:
@@ -805,6 +838,8 @@ class _SiteHTMLParser(HTMLParser):
         ad: dict[str, str] = {}
         for k, v in attrs:
             kl = k.lower()
+            if kl == "xml:base":
+                self.html_issues.append(("publish", "XML base attribute in site/"))
             if kl in ad:
                 self.html_issues.append(("publish", f"duplicate HTML attribute in site/ ({kl})"))
                 continue
@@ -826,25 +861,69 @@ class _SiteHTMLParser(HTMLParser):
             if kl == "style":
                 self.style_blocks.append(v)
                 self.subtrees.append(unescape_css_literals(v))
-            if kl == "srcdoc" and self.depth < 3:
-                self.subtrees.append(normalize_html_text(v, self.depth + 1, page_rel=self.page_rel))
+            if kl == "srcdoc":
+                if self.depth < 3:
+                    nested = _parse_site_html(v, depth=self.depth + 1, page_rel=self.page_rel)
+                    self.html_issues.extend(nested.html_issues)
+                    self.style_blocks.extend(nested.style_blocks)
+                    self.asset_refs.extend(nested.asset_refs)
+                    self.subtrees.append(normalize_html_text(v, self.depth + 1, page_rel=self.page_rel))
+                else:
+                    self.html_issues.append(("publish", "deeply nested iframe srcdoc in site/"))
+        if "hidden" in ad:
+            self.html_issues.append(("publish", "hidden HTML attribute in site/"))
         if ad.get("id"):
             self.element_ids.add(ad["id"])
         if t == "a" and ad.get("name"):
             self.element_ids.add(ad["name"])
         if t == "link" and "href" in ad:
             rel_tokens = {tok.lower() for tok in ad.get("rel", "").split()}
-            if rel_tokens & {"stylesheet", "icon", "apple-touch-icon", "manifest"}:
+            if rel_tokens & {
+                "stylesheet", "icon", "apple-touch-icon", "manifest",
+                "preload", "modulepreload", "prefetch", "dns-prefetch",
+                "preconnect", "prerender", "mask-icon",
+            }:
                 self.asset_refs.append(("link", ad["href"]))
-        elif t == "script" and "src" in ad:
-            self.asset_refs.append(("script", ad["src"]))
+        elif t == "script":
+            script_src = ad.get("src") or ad.get("href") or ad.get("xlink:href")
+            if script_src is not None:
+                self.asset_refs.append(("script", script_src))
         elif t in ("img", "source"):
             if "src" in ad:
                 self.asset_refs.append(("img", ad["src"]))
             if "srcset" in ad and not re.match(r"^(?:data|javascript|vbscript):", ad["srcset"].strip(), re.IGNORECASE):
-                for cand in ad["srcset"].split(","):
-                    parts = cand.strip().split()
-                    self.asset_refs.append(("img", parts[0] if parts else ""))
+                for cand_url in _parse_srcset_urls(ad["srcset"]):
+                    self.asset_refs.append(("img", cand_url))
+        elif t in ("iframe", "embed", "audio", "video", "input", "track"):
+            if "src" in ad:
+                self.asset_refs.append((t, ad["src"]))
+            if t == "video" and "poster" in ad:
+                self.asset_refs.append(("video", ad["poster"]))
+        elif t == "object" and "data" in ad:
+            self.asset_refs.append(("object", ad["data"]))
+        elif t == "meta" and ad.get("http-equiv", "").strip().lower() == "refresh" and "content" in ad:
+            m = re.match(
+                r"^\s*\d+(?:\.\d*)?\s*[;,]\s*(?:url\s*=\s*)?(?:\"([^\"]*)\"|'([^']*)'|(.+?))\s*$",
+                ad["content"],
+                re.IGNORECASE,
+            )
+            if m:
+                refresh_url = next((g for g in m.groups() if g is not None), "").strip()
+                if refresh_url:
+                    compact_ref = re.sub(r"[\x00-\x20]+", "", refresh_url)
+                    unq_ref = re.sub(r"[\x00-\x20]+", "", urllib.parse.unquote(compact_ref))
+                    for chk_val in (compact_ref, unq_ref):
+                        if re.match(r"^(?:javascript|vbscript):", chk_val, re.IGNORECASE):
+                            self.html_issues.append(("publish", "javascript: or vbscript: URI attribute in site/"))
+                        elif re.match(r"^data:", chk_val, re.IGNORECASE):
+                            self.html_issues.append(("publish", "embedded data URI asset requires direct file scan"))
+                    self.asset_refs.append(("meta", refresh_url))
+        elif t in ("image", "use", "feimage"):
+            if t == "image" and "src" in ad:
+                self.asset_refs.append(("img", ad["src"]))
+            svg_href = ad.get("href") or ad.get("xlink:href")
+            if svg_href and not svg_href.strip().startswith("#"):
+                self.asset_refs.append(("img", svg_href))
         elif t == "a" and "href" in ad:
             self.asset_refs.append(("anchor", ad["href"]))
         if t in ("script", "style", "title"):
@@ -854,7 +933,7 @@ class _SiteHTMLParser(HTMLParser):
             self._raw_chunks = []
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        t = tag.lower()
+        t = tag.lower().rsplit(":", 1)[-1]
         if t in ("script", "style", "title"):
             self.html_issues.append(("publish", "self-closing script or style tag in site/"))
             self.set_cdata_mode(t)
@@ -883,7 +962,7 @@ class _SiteHTMLParser(HTMLParser):
         self.html_issues.append(("publish", "HTML processing instruction in site/"))
 
     def handle_endtag(self, tag: str) -> None:
-        t = tag.lower()
+        t = tag.lower().rsplit(":", 1)[-1]
         if self._raw_tag == t:
             self._flush_raw_tag(t)
         if t in HTML_BLOCK_TAGS:
@@ -949,22 +1028,35 @@ def check_site_links_and_safety(
     if BIDI_CONTROL_RE.search(text):
         _emit("publish", "bidirectional control character in published site/ asset (section 13)")
 
-    def _check_css_text(css_text: str) -> None:
+    def _validate_css_target(target: str) -> None:
+        if not target or target.startswith("#"):
+            return
+        if re.match(r"^(?:https?:|//|data:|javascript:|vbscript:)", target, re.IGNORECASE):
+            _emit("publish", f"remote or inline-scheme CSS url() resource ({target[:36]}) (section 13)")
+            return
+        resolved = resolve_site_asset_href(rel, target)
+        if resolved is None:
+            _emit("publish", f"escaping CSS url() resource ({target[:36]}) (section 13)")
+        elif not (root / resolved).is_file():
+            _emit("links", f"broken local CSS asset link -> {target}")
+
+    def _check_css_text(css_text: str, *, allow_hiding: bool = True) -> None:
         clean_css = CSS_COMMENT_RE.sub("", unescape_css_literals(css_text))
         if re.search(r"(?i)@import\b", clean_css):
             _emit("publish", "CSS @import external stylesheet (section 13)")
-        for m in re.finditer(r"(?i)\burl\s*\(\s*([^)]+)\)", clean_css):
-            target = m.group(1).strip().strip("\"'").strip()
-            if not target or target.startswith("#"):
-                continue
-            if re.match(r"^(?:https?:|//|data:|javascript:|vbscript:)", target, re.IGNORECASE):
-                _emit("publish", f"remote or inline-scheme CSS url() resource ({target[:36]}) (section 13)")
-                continue
-            resolved = resolve_site_asset_href(rel, target)
-            if resolved is None:
-                _emit("publish", f"escaping CSS url() resource ({target[:36]}) (section 13)")
-            elif not (root / resolved).is_file():
-                _emit("links", f"broken local CSS asset link -> {target}")
+        if not allow_hiding and re.search(
+            r"(?i)(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?(?:\s*[;}]|$))",
+            clean_css,
+        ):
+            _emit("publish", "hidden CSS text rule in HTML site/ asset (section 13)")
+        for m in re.finditer(r'(?i)\burl\s*\(\s*(?:"([^"]*)"|\'([^\']*)\'|([^)]+))\s*\)', clean_css):
+            target = next((g for g in m.groups() if g is not None), "").strip()
+            _validate_css_target(target)
+        for m in re.finditer(r"(?i)(?:-webkit-)?image-set\s*\(((?:[^()]|\([^()]*\))*)\)", clean_css):
+            inner = re.sub(r"(?i)\b(?:type|url)\s*\([^)]*\)", "", m.group(1))
+            for sm in re.finditer(r'"([^"]+)"|\'([^\']+)\'', inner):
+                target = (sm.group(1) if sm.group(1) is not None else sm.group(2)).strip()
+                _validate_css_target(target)
 
     suffix = path.suffix.lower()
     if suffix == ".css":
@@ -992,16 +1084,24 @@ def check_site_links_and_safety(
     if suffix not in (".html", ".htm", ".xhtml", ".svg", ".xml"):
         return
 
+    if re.search(r"(?is)<!(?:ENTITY\b|DOCTYPE\b[^>\[]*\[)", text):
+        _emit("publish", "custom XML entity or internal DTD subset in site/ asset (section 13)")
+
     parser = _parse_site_html(text, page_rel=rel)
     for cat, msg in parser.html_issues:
         _emit(cat, f"{msg} (section 13)")
     for css_blk in parser.style_blocks:
-        _check_css_text(css_blk)
-    if suffix not in (".html", ".htm", ".xhtml"):
-        return
+        _check_css_text(css_blk, allow_hiding=False)
 
+    def _is_valid_fragment(frag: str) -> bool:
+        return not frag or frag.lower() == "top" or frag in parser.element_ids
+
+    resource_kinds = {
+        "link", "script", "img", "iframe", "object", "embed",
+        "audio", "video", "input", "track", "meta",
+    }
     for kind, target in parser.asset_refs:
-        if kind in ("link", "script", "img"):
+        if kind in resource_kinds:
             if re.match(r"^(?:data|javascript|vbscript):", target.strip(), re.IGNORECASE):
                 continue
             resolved = resolve_site_asset_href(rel, target)
@@ -1009,23 +1109,23 @@ def check_site_links_and_safety(
                 _emit("publish", f"remote or escaping {kind} asset in site/ ({target[:36]}) (section 13)")
             elif not (root / resolved).is_file():
                 _emit("links", f"broken local {kind} link -> {target}")
-        elif kind == "anchor":
+        elif kind == "anchor" and suffix in (".html", ".htm", ".xhtml"):
             raw = target.strip()
             if not raw:
                 continue
             unq_raw = urllib.parse.unquote(raw)
-            if re.match(r"^(?:https?:|mailto:|tel:|javascript:|vbscript:|data:|//)", raw, re.IGNORECASE) or re.match(
-                r"^(?:https?:|mailto:|tel:|javascript:|vbscript:|data:|//)", unq_raw, re.IGNORECASE
+            if re.match(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)", raw) or re.match(
+                r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)", unq_raw
             ):
                 continue
             if raw.startswith("#"):
                 frag = urllib.parse.unquote(raw[1:])
-                if frag and frag not in parser.element_ids:
+                if not _is_valid_fragment(frag):
                     _emit("links", f"broken fragment link -> {target}")
             elif raw.startswith("?"):
                 if "#" in raw:
                     frag = urllib.parse.unquote(raw.split("#", 1)[1])
-                    if frag and frag not in parser.element_ids:
+                    if not _is_valid_fragment(frag):
                         _emit("links", f"broken fragment link -> {target}")
             else:
                 resolved = resolve_site_asset_href(rel, raw, allow_root=True)
@@ -1035,9 +1135,9 @@ def check_site_links_and_safety(
                     target_path = root / resolved
                     if not (target_path.is_file() or (target_path / "index.html").is_file()):
                         _emit("links", f"broken relative link -> {target}")
-                    elif resolved == "site" and rel == "site/index.html" and "#" in raw:
+                    elif (resolved == rel or (resolved == "site" and rel == "site/index.html")) and "#" in raw:
                         frag = urllib.parse.unquote(raw.split("#", 1)[1])
-                        if frag and frag not in parser.element_ids:
+                        if not _is_valid_fragment(frag):
                             _emit("links", f"broken fragment link -> {target}")
 
 

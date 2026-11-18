@@ -455,6 +455,11 @@ class LeakTest(CheckerTestCase):
             '<a href="product%2Ddetails.html">Product</a>'
             "</div>\n",
         )
+        (self.root / "site/ok.png").write_bytes(_make_png())
+        self.write(
+            "site/ok-imageset.css",
+            'p { background-image: image-set(url("ok.png") type("image/png") 1x); }\n',
+        )
         clean = self.report()
         check_site.check_leaks(self.root, clean)
         self.assertEqual(clean.findings, [])
@@ -489,6 +494,163 @@ class LeakTest(CheckerTestCase):
         self.assertTrue(any("broken fragment link -> #missing-id" in m for m in links), links)
         self.assertTrue(any("broken fragment link -> ?lang=en#missing-id" in m for m in links), links)
         self.assertTrue(any("broken relative link -> ../outside.html" in m for m in links), links)
+
+    def test_implicit_top_fragment_and_autoloading_resources_and_hidden_css(self):
+        self.write(
+            "site/index.html",
+            '<a href="#top">Top</a>'
+            '<a href="#TOP">TOP</a>'
+            '<a href="?lang=en#Top">Query Top</a>'
+            '<a href="/#top">Root Top</a>'
+            '<a href="./#TOP">Dot Top</a>'
+            '<a href="index.html#top">Index Top</a>'
+            '<a href="sms:+15555550100">SMS</a>'
+            '<a href="geo:37.786971,-122.399677">Map</a>'
+            '<img srcset="ok.png?variant=a,b 1x">\n',
+        )
+        (self.root / "site/ok.png").write_bytes(_make_png())
+        (self.root / "site/ok(1).png").write_bytes(_make_png())
+        self.write(
+            "site/ok-imageset.css",
+            'p { background-image: image-set(url("ok.png") type("image/png") 1x); }\n'
+            'div { background-image: url("ok(1).png"); }\n',
+        )
+        clean = self.report()
+        check_site.check_leaks(self.root, clean)
+        self.assertEqual(clean.findings, [])
+
+        self.write(
+            "site/autoload-remote.html",
+            '<iframe src="https://cdn.example.com/frame.html"></iframe>\n'
+            '<object data="https://cdn.example.com/obj.swf"></object>\n'
+            '<embed src="https://cdn.example.com/emb.swf">\n'
+            '<audio src="https://cdn.example.com/a.mp3"></audio>\n'
+            '<video src="https://cdn.example.com/v.mp4" poster="missing-poster.png"></video>\n'
+            '<input type="image" src="missing-btn.png">\n'
+            '<link rel="preload" as="script" href="https://cdn.example.com/pre.js">\n'
+            '<meta http-equiv="refresh" content="0;url=https://cdn.example.com/redir">\n'
+            '<meta http-equiv="refresh" content="0; https://collector.invalid/replaced">\n'
+            '<image src="https://cdn.example.com/legacy.png">\n',
+        )
+        self.write(
+            "site/autoload-js-refresh.html",
+            '<meta http-equiv="refresh" content="0;url=javascript:alert(1)">\n',
+        )
+        self.write(
+            "site/decoy-hidden.html",
+            '<style>.mask{display:none}</style>\n'
+            '<span style="visibility:hidden">a</span>\n'
+            '<span style="opacity: 0">b</span>\n'
+            '<span hidden>c</span>\n',
+        )
+        self.write(
+            "site/srcdoc-remote.html",
+            '<iframe srcdoc="&lt;script src=&quot;https://cdn.example.com/x.js&quot;&gt;&lt;/script&gt;"></iframe>\n',
+        )
+        self.write(
+            "site/foreign-remote.svg",
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<foreignObject width="100" height="100">'
+            '<img xmlns="http://www.w3.org/1999/xhtml" src="https://cdn.example.com/x.png" />'
+            '</foreignObject>'
+            '<image href="https://cdn.example.com/y.png" />'
+            '<script href="https://cdn.example.com/x.js"></script>'
+            '</svg>\n',
+        )
+        self.write(
+            "site/css-escapes-and-imageset.css",
+            'p::after { content: "db-primary.ops.in\\ternal"; }\n'
+            'p::before { content: "/home/" "operator/prod/config"; }\n'
+            'p { background-image: image-set("https://cdn.example.com/x.png" 1x, "missing-set.png" 2x); }\n',
+        )
+        self.write(
+            "site/entity-smuggle.svg",
+            '<!DOCTYPE svg [<!ENTITY home "/home/">]><svg xmlns="http://www.w3.org/2000/svg"><text>&home;</text></svg>\n',
+        )
+        self.write(
+            "site/ns-and-xmlbase.svg",
+            '<s:svg xmlns:s="http://www.w3.org/2000/svg" xml:base="https://cdn.example.com/">'
+            '<s:script href="https://cdn.example.com/x.js"></s:script></s:svg>\n',
+        )
+        dirty = self.report()
+        check_site.check_leaks(self.root, dirty)
+        publish = self.messages(dirty, "publish")
+        links = self.messages(dirty, "links")
+        for kind in ("iframe", "object", "embed", "audio", "video", "link", "meta", "script", "img"):
+            self.assertTrue(
+                any(f"remote or escaping {kind} asset" in m for m in publish),
+                (kind, publish),
+            )
+        self.assertTrue(
+            any("site/srcdoc-remote.html" in m and "remote or escaping script asset" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/foreign-remote.svg" in m and "https://cdn.example.com/x.png" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/foreign-remote.svg" in m and "https://cdn.example.com/y.png" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/foreign-remote.svg" in m and "https://cdn.example.com/x.js" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/css-escapes-and-imageset.css" in m and "internal hostname" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/css-escapes-and-imageset.css" in m and "absolute home path" in m for _, m in dirty.findings),
+            dirty.findings,
+        )
+        self.assertTrue(
+            any("site/entity-smuggle.svg" in m and "custom XML entity" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/ns-and-xmlbase.svg" in m and "XML base attribute in site/" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/ns-and-xmlbase.svg" in m and "remote or escaping script asset" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/css-escapes-and-imageset.css" in m and "https://cdn.example.com/x.png" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/css-escapes-and-imageset.css" in m and "missing-set.png" in m for m in links),
+            links,
+        )
+        self.assertTrue(
+            any("site/autoload-remote.html" in m and "https://collector.invalid/replaced" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/autoload-remote.html" in m and "https://cdn.example.com/legacy.png" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(any("javascript: or vbscript: URI attribute" in m for m in publish), publish)
+        self.assertTrue(any("broken local video link -> missing-poster.png" in m for m in links), links)
+        self.assertTrue(any("broken local input link -> missing-btn.png" in m for m in links), links)
+        self.assertTrue(any("hidden CSS text rule in HTML site/ asset" in m for m in publish), publish)
+        self.assertTrue(any("hidden HTML attribute in site/" in m for m in publish), publish)
+
+        policy_path = Path(__file__).resolve().parents[1] / ".github" / "governance" / "policy.json"
+        import json
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        for pattern in (
+            "site/**/*.js",
+            "site/**/*.mjs",
+            "site/**/*.cjs",
+            "site/**/*.css",
+            "site/**/*.png",
+            "site/**/*.ico",
+        ):
+            self.assertIn(pattern, policy["r2_paths"])
 
     def test_tracked_workflow_and_config_files_scan_identifiers_with_placeholder_exemptions(self):
         self.write(
