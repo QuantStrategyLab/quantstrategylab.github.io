@@ -554,6 +554,7 @@ class LeakTest(CheckerTestCase):
             '<img xmlns="http://www.w3.org/1999/xhtml" src="https://cdn.example.com/x.png" />'
             '</foreignObject>'
             '<image href="https://cdn.example.com/y.png" />'
+            '<rect fill="url(https://collector.invalid/paint.svg#p)" />'
             '<script href="https://cdn.example.com/x.js"></script>'
             '</svg>\n',
         )
@@ -595,6 +596,10 @@ class LeakTest(CheckerTestCase):
         )
         self.assertTrue(
             any("site/foreign-remote.svg" in m and "https://cdn.example.com/x.js" in m for m in publish),
+            publish,
+        )
+        self.assertTrue(
+            any("site/foreign-remote.svg" in m and "https://collector.invalid/paint.svg#" in m for m in publish),
             publish,
         )
         self.assertTrue(

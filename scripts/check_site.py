@@ -861,6 +861,12 @@ class _SiteHTMLParser(HTMLParser):
             if kl == "style":
                 self.style_blocks.append(v)
                 self.subtrees.append(unescape_css_literals(v))
+            elif kl in {
+                "fill", "stroke", "clip-path", "mask", "filter",
+                "marker-start", "marker-mid", "marker-end",
+            } and "url(" in unescape_css_literals(v).lower():
+                self.style_blocks.append(f"{kl}: {v}")
+                self.subtrees.append(unescape_css_literals(v))
             if kl == "srcdoc":
                 if self.depth < 3:
                     nested = _parse_site_html(v, depth=self.depth + 1, page_rel=self.page_rel)
